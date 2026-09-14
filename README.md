@@ -27,6 +27,10 @@ A fast, private, 100% offline background removal desktop application tailored fo
   - Split Before/After comparison slider.
   - Side-by-Side and Cutout Only view modes.
   - Live preview swatches: Dark Checkerboard, Light Checkerboard, Solid Black, Solid White, and Green Screen.
+- **🖌️ Interactive Refine Brush (Erase & Restore Touch-Up):**
+  - **Erase Mode:** Instantly erase stray background details, shadows, or artifacts.
+  - **Restore Mode:** Paint over clipped sections to recover details from the original image.
+  - Adjustable brush radius with on-screen visual cursor, softness feathering slider, zoom & pan controls, and instant GPU-accelerated undo/redo (`Ctrl + Z` / `Ctrl + Y`).
 - **🖥️ Standalone Desktop Window:**
   - Runs in a clean, isolated application window with zero terminal windows cluttering `Alt + Tab`.
   - Automatic watchdog keep-alive: cleanly exits when the window closes to free system resources.
@@ -66,6 +70,12 @@ A fast, private, 100% offline background removal desktop application tailored fo
 | **`Ctrl + C`** | Copy transparent PNG result to clipboard |
 | **`Ctrl + S`** | Save cutout as PNG file |
 | **`Ctrl + R`** | Reload application |
+| **`E` or `1`** | Switch to Erase Brush *(when in Refine Brush mode)* |
+| **`R` or `2`** | Switch to Restore Brush *(when in Refine Brush mode)* |
+| **`[` / `]`** | Decrease / Increase brush size |
+| **`Ctrl + Z` / `Ctrl + Y`** | Undo / Redo brush strokes |
+| **`Space + Drag`** | Pan image canvas when zoomed in |
+| **`Escape`** | Exit Refine Brush mode |
 
 ---
 
