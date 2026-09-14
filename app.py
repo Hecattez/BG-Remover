@@ -106,12 +106,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 10px 16px;
+    padding: 10px 20px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 20px;
   }
 
   .brand {
