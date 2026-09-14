@@ -55,6 +55,7 @@ AVAILABLE_MODELS = {
 sessions = {}
 
 import multiprocessing
+import onnxruntime as ort
 
 def get_session(model_name: str):
     if model_name not in AVAILABLE_MODELS:
