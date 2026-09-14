@@ -28,6 +28,10 @@ A fast, private, 100% offline background removal desktop application tailored fo
   - Removes dark color bleeding and shadow halos without destroying edge anti-aliasing or causing stair-stepped jaggedness.
 - **🎨 Color Spill Decontamination (Background Unmixing):**
   - Mathematically eliminates background color casts, green-screen reflection halos, and bleached frosty edges along semi-transparent fur, hair, and soft silhouettes using multi-level Laplacian foreground estimation.
+- **💇 Studio Hair & Fur Matting:**
+  - Levin closed-form alpha matting on adaptive boundary trimaps to extract delicate individual hair strands, fine fur fringes, and translucent fibers with true continuous optical transparency.
+- **🗺️ Spatially-Varying Local Background Field:**
+  - Euclidean Distance Transform nearest-neighbor propagation models local background color across non-uniform studio lighting, vignetted corners, and gradients, preventing trapped cavities in hair curls and object handles.
 - **🔍 Interactive Comparison & Live Backdrops:**
   - Split Before/After comparison slider.
   - Side-by-Side and Cutout Only view modes.

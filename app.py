@@ -775,6 +775,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <span>Color Decontam</span>
     </label>
 
+    <label class="auto-copy-toggle" title="Learned Levin closed-form alpha matting for individual hair strands, fur, and delicate translucent fibers">
+      <input type="checkbox" id="mattingCheck">
+      <span>Studio Matting</span>
+    </label>
     <label class="auto-copy-toggle" title="Only enable for solid camouflaged items (e.g. white shrimp on white plate). Leave off for cords, loops, and hollow objects.">
       <input type="checkbox" id="recoverHolesCheck">
       <span>Solid Subject</span>
@@ -1041,6 +1045,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (currentFile) processImage(currentFile);
     });
   }
+  const mattingCheck = document.getElementById('mattingCheck');
+  if (mattingCheck) {
+    mattingCheck.addEventListener('change', () => {
+      if (currentFile) processImage(currentFile);
+    });
+  }
 
   // Paste Event
   window.addEventListener('paste', (e) => {
@@ -1103,14 +1113,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const model = modelSelect.value;
       const trim = document.getElementById('trimSelect')?.value ?? '1';
       const decontam = document.getElementById('decontamCheck')?.checked ?? true;
+      const studioMatting = document.getElementById('mattingCheck')?.checked ?? false;
       const recoverHoles = document.getElementById('recoverHolesCheck')?.checked ?? false;
-      const resp = await fetch(`/api/remove?model=${encodeURIComponent(model)}&trim=${encodeURIComponent(trim)}&decontaminate=${decontam}&recover_holes=${recoverHoles}`, {
+      const resp = await fetch(`/api/remove?model=${encodeURIComponent(model)}&trim=${encodeURIComponent(trim)}&decontaminate=${decontam}&recover_holes=${recoverHoles}&matting=${studioMatting}`, {
         method: 'POST',
         body: file,
         signal: controller.signal
       });
-      clearTimeout(timeoutId);
-
       if (!resp.ok) {
         const errText = await resp.text();
         throw new Error(errText || 'Processing failed');
@@ -1949,19 +1958,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
-def suppress_background_webbing(alpha_arr, orig_arr):
+def compute_local_background_field(orig_arr, alpha_arr):
     """
-    Background Cavity & Webbing Suppression:
-    Detects background pockets showing through thin structures (e.g. sky between parachute
-    cords, background between bicycle spokes or chair slats). Samples the background color
-    from confirmed border background pixels. If a pixel lies outside the solid core
-    (dilated by 3px) and closely matches the background color (Delta E < 26), it is
-    suppressed to transparent.
+    Computes a spatially-varying local background color map using Euclidean Distance
+    Transform nearest-neighbor propagation (O(N) vectorized time).
+    Every pixel receives the exact RGB color of its closest confirmed background pixel,
+    correctly handling gradients, studio lighting, vignettes, and shadows.
     """
     import numpy as np
     import scipy.ndimage as ndi
 
-    h, w = alpha_arr.shape
+    h, w, _ = orig_arr.shape
+    is_confirmed_bg = alpha_arr < 15
+
+    # Ensure border background anchor points exist
     border = np.zeros((h, w), dtype=bool)
     border_sz = max(4, min(30, min(h, w) // 25))
     border[:border_sz, :] = True
@@ -1969,18 +1979,36 @@ def suppress_background_webbing(alpha_arr, orig_arr):
     border[:, :border_sz] = True
     border[:, -border_sz:] = True
 
-    bg_pts = orig_arr[border & (alpha_arr < 5)]
-    if len(bg_pts) < 10:
-        bg_pts = orig_arr[:15, :15].reshape(-1, 3)
+    is_bg_anchors = is_confirmed_bg | (border & (alpha_arr < 128))
+    if np.sum(is_bg_anchors) < 50:
+        is_bg_anchors[:border_sz, :border_sz] = True
+        is_bg_anchors[:border_sz, -border_sz:] = True
 
-    bg_color = np.median(bg_pts, axis=0)
-    color_dist = np.linalg.norm(orig_arr.astype(np.float32) - bg_color, axis=2)
+    _, (r_idx, c_idx) = ndi.distance_transform_edt(~is_bg_anchors, return_indices=True)
+    local_bg = orig_arr[r_idx, c_idx].astype(np.float32)
+    local_dist = np.linalg.norm(orig_arr.astype(np.float32) - local_bg, axis=2)
+
+    return local_bg, local_dist
+
+def suppress_background_webbing(alpha_arr, orig_arr, local_dist=None):
+    """
+    Background Cavity & Webbing Suppression:
+    Detects background pockets showing through thin structures (e.g. sky between parachute
+    cords, background between bicycle spokes, or trapped studio pockets in hair curls).
+    Uses the local background contrast field: if a non-solid pixel matches its adjacent
+    local background (local_dist < 26.0), it is suppressed to transparent.
+    """
+    import numpy as np
+    import scipy.ndimage as ndi
+
+    if local_dist is None:
+        _, local_dist = compute_local_background_field(orig_arr, alpha_arr)
 
     # Solid core: confidence >= 180 dilated by 3px is protected
     solid_core = alpha_arr >= 180
     solid_zone = ndi.binary_dilation(solid_core, iterations=3)
 
-    is_webbing = (~solid_zone) & (color_dist < 26.0) & (alpha_arr > 0)
+    is_webbing = (~solid_zone) & (local_dist < 26.0) & (alpha_arr > 0)
     return np.where(is_webbing, 0, alpha_arr).astype(np.uint8)
 
 def clean_orphan_islands_distance(alpha_arr, max_distance=30, min_size_ratio=0.03):
@@ -2055,7 +2083,7 @@ def fast_guided_filter(guide, p, r=2, eps=1e-3):
     q = mean_a * guide + mean_b
     return np.clip(q, 0.0, 1.0)
 
-def recover_fine_details(mask_arr, orig_arr):
+def recover_fine_details(mask_arr, orig_arr, local_dist=None):
     """
     Selective Fine Detail & Cord Recovery:
     Only boosts isolated thin structures (like 1-pixel headphone cords, fine wires,
@@ -2067,20 +2095,8 @@ def recover_fine_details(mask_arr, orig_arr):
     import numpy as np
     import scipy.ndimage as ndi
 
-    h, w = mask_arr.shape
-    border = np.zeros((h, w), dtype=bool)
-    border_sz = max(4, min(30, min(h, w) // 25))
-    border[:border_sz, :] = True
-    border[-border_sz:, :] = True
-    border[:, :border_sz] = True
-    border[:, -border_sz:] = True
-
-    bg_pts = orig_arr[border & (mask_arr < 5)]
-    if len(bg_pts) < 10:
-        return mask_arr
-
-    bg_color = np.median(bg_pts, axis=0)
-    color_dist = np.linalg.norm(orig_arr.astype(np.float32) - bg_color, axis=2)
+    if local_dist is None:
+        _, local_dist = compute_local_background_field(orig_arr, mask_arr)
 
     # Solid core: pixels with confidence >= 180
     solid_core = mask_arr >= 180
@@ -2091,14 +2107,46 @@ def recover_fine_details(mask_arr, orig_arr):
     is_thin_structure = (mask_arr > 1) & (~solid_boundary_zone)
 
     contrast_threshold = 38.0
-    boost_factor = np.clip((color_dist - contrast_threshold) / 30.0, 0.0, 1.0)
+    boost_factor = np.clip((local_dist - contrast_threshold) / 30.0, 0.0, 1.0)
 
     boosted = np.where(
-        is_thin_structure & (color_dist > contrast_threshold),
+        is_thin_structure & (local_dist > contrast_threshold),
         np.maximum(mask_arr.astype(np.float32), 255.0 * boost_factor),
         mask_arr.astype(np.float32)
     )
     return np.clip(boosted, 0, 255).astype(np.uint8)
+
+def refine_alpha_matting(orig_arr, alpha_arr, erode_sz=8):
+    """
+    Closed-Form Alpha Matting (Levin et al. CVPR/TPAMI):
+    Constructs an adaptive trimap around ambiguous silhouette boundaries (hair strands,
+    fur fringes, translucent fibers) and solves the Matting Laplacian linear system
+    to recover continuous fractional optical alpha.
+    """
+    try:
+        import numpy as np
+        import scipy.ndimage as ndi
+        import pymatting
+
+        h, w = alpha_arr.shape
+        struct = np.ones((erode_sz, erode_sz), dtype=bool)
+
+        is_fg = ndi.binary_erosion(alpha_arr > 240, structure=struct)
+        is_bg = ndi.binary_erosion(alpha_arr < 15, structure=struct, border_value=1)
+
+        trimap = np.full((h, w), 0.5, dtype=np.float64)
+        trimap[is_fg] = 1.0
+        trimap[is_bg] = 0.0
+
+        # Run closed-form alpha matting with Levin matting Laplacian
+        alpha_cf = pymatting.estimate_alpha_cf(
+            orig_arr.astype(np.float64) / 255.0,
+            trimap
+        )
+        return np.clip(alpha_cf, 0.0, 1.0)
+    except Exception as e:
+        print(f"[Matting Warning] Fallback to standard alpha: {e}")
+        return alpha_arr.astype(np.float32) / 255.0
 
 def fuse_dual_pass_saliency(input_bytes, orig_img, session):
     """
@@ -2244,6 +2292,7 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
             model_name = qs.get("model", ["isnet-general-use"])[0]
             trim_px = int(qs.get("trim", ["1"])[0])
             decontam = qs.get("decontaminate", ["true"])[0].lower() == "true"
+            studio_matting = qs.get("matting", ["false"])[0].lower() == "true"
             recover_holes = qs.get("recover_holes", ["true"])[0].lower() == "true"
 
             length = int(self.headers.get("Content-Length", 0))
@@ -2277,28 +2326,32 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                     )
                     a_arr = np.array(Image.open(io.BytesIO(raw_mask_bytes)).convert("L"))
 
-                # 1. Background cavity / webbing suppression (un-webs background between thin cords and spokes)
-                a_unwebbed = suppress_background_webbing(a_arr, orig_arr)
+                # 1. Spatially-varying Local Background Field (O(N) EDT propagation)
+                _, local_dist = compute_local_background_field(orig_arr, a_arr)
 
-                # 2. Selective fine detail & cord recovery (protects solid boundaries, boosts thin connected cords)
-                a_recovered = recover_fine_details(a_unwebbed, orig_arr)
+                # 2. Background cavity / webbing suppression using local background field
+                a_unwebbed = suppress_background_webbing(a_arr, orig_arr, local_dist=local_dist)
 
-                # 3. Distance-based orphan island suppression (removes disconnected border strips and floating specks)
+                # 3. Selective fine detail & cord recovery using local background field
+                a_recovered = recover_fine_details(a_unwebbed, orig_arr, local_dist=local_dist)
+
+                # 4. Distance-based orphan island suppression (removes disconnected border strips and floating specks)
                 a_pruned = clean_orphan_islands_distance(a_recovered)
 
-                # 4. Guided Filter: aligns alpha directly to photographic sensor optical anti-aliasing
-                orig_gray = np.mean(orig_arr.astype(np.float32) / 255.0, axis=2)
-                a_norm = a_pruned.astype(np.float32) / 255.0
-                a_guided = fast_guided_filter(orig_gray, a_norm, r=2, eps=1e-3)
+                # 5. Alpha Matting (Hair & Fur Studio Matting) or Fast Guided Filter
+                if studio_matting:
+                    a_norm = refine_alpha_matting(orig_arr, a_pruned)
+                else:
+                    orig_gray = np.mean(orig_arr.astype(np.float32) / 255.0, axis=2)
+                    a_norm = fast_guided_filter(orig_gray, a_pruned.astype(np.float32) / 255.0, r=2, eps=1e-3)
 
-                # 5. Defringe (smooth continuous edge curve without jagged stair-stepping)
+                # 6. Defringe (smooth continuous edge curve without jagged stair-stepping)
                 if trim_px > 0:
                     cutoff = 0.02 * trim_px
-                    a_clean = np.clip((a_guided - cutoff) / (1.0 - cutoff), 0.0, 1.0)
+                    a_clean = np.clip((a_norm - cutoff) / (1.0 - cutoff), 0.0, 1.0)
                     a_clean = np.power(a_clean, 1.0 + 0.05 * trim_px)
                 else:
-                    a_clean = a_guided
-
+                    a_clean = a_norm
                 a_final = (a_clean * 255.0).astype(np.uint8)
 
                 # 6. Color Spill Decontamination (Background Unmixing):

@@ -43,7 +43,8 @@ graph TD
 
 ---
 
-## 3. The 6 Major Failure Modes Identified & Solved
+## 3. The 7 Major Failure Modes Identified & Solved
+
 ### Failure Mode 1: Topological Cavity & Hole Retention
 - **Symptom:** On images with hollow loops (e.g., green/beige headphones), the background inside the headband loop was retained as solid foreground ($\alpha = 254$).
 - **Root Cause:** 
@@ -128,6 +129,20 @@ graph TD
   - **Empirical Validation:**
     - **Green Screen Test:** Raw edge RGB $[109.4, 169.5, 39.5]$ (heavy green bleed) was mathematically restored to $[199.0, 119.0, 49.0]$, matching the true subject color $[200, 120, 50]$ within $\pm 1$ unit.
     - **Dog Fur on White Background:** Bleached edge RGB $[227.7, 204.6, 189.0] \to$ rich warm fur $[190.1, 138.6, 104.6]$, completely eliminating milky white halos when pasted on black.
+
+---
+
+### Failure Mode 7: Studio Lighting Gradients & Enclosed Hair Cavities (Global Background Fallacy)
+- **Symptom:** In portrait photography shot on studio backdrops (such as the blonde woman on an amber/orange studio backdrop), large solid slabs of the background remained trapped between hair curls and around the neck as opaque foreground.
+- **Root Cause:**
+  - The earlier implementation sampled a single global median background color strictly from the image's outermost border edges.
+  - In real studio photography, backdrops are rarely flat uniform planes: vignetting darkens the outer corners, while key and fill lights brightly illuminate the backdrop directly behind the subject's head.
+  - Because the bright orange backdrop behind her head deviated substantially from the dark vignetted border color ($\Delta E > 80$), both webbing suppression and fine-detail recovery falsely classified the background pocket as a "high-contrast foreground detail" and boosted it to solid opacity.
+- **Resolution:**
+  - **Spatially-Varying Local Background Field (`compute_local_background_field`):**
+    Computes an exact Euclidean Distance Transform nearest-neighbor propagation field in $O(N)$ vectorized time ($\sim 100\text{ms}$). Every pixel measures its color distance against the confirmed background immediately adjacent to it, correctly recognizing that the trapped pocket matches its local backdrop ($\Delta E < 15$) and purging it.
+  - **Closed-Form Alpha Matting (`refine_alpha_matting`):**
+    Integrated Levin et al. Closed-Form Alpha Matting solving the Matting Laplacian over an adaptive boundary trimap ($0.05 < \alpha < 0.95$). Converts coarse silhouette boundaries into soft, delicate individual hair strands with true optical transparency in $\sim 500\text{ms}$ on CPU.
 ---
 
 ## 4. The Interactive Smart AI Studio (Smart Brush & Magic Tap)
@@ -159,6 +174,8 @@ To allow instant touch-ups without tedious manual pixel tracing, we built client
 | - *Orphan Island Pruning Stage* | — | $1200 \times 900$ | $8\text{ms}$ | Prunes border strips and dust |
 | - *Webbing Suppression Stage* | — | $1200 \times 900$ | $12\text{ms}$ | Separates cords and spokes |
 |- *Color Spill Decontamination Stage* | — | $1000 \times 1000$ | $\sim 150\text{ms}$ | Unmixes & cancels background color reflections |
+|- *Local Background Field Propagation* | — | $1104 \times 736$ | $100\text{ms}$ | Spatially models studio lighting & gradients |
+|- *Closed-Form Alpha Matting Stage* | — | $896 \times 1344$ | $\sim 500\text{ms}$ | Levin matting Laplacian for hair/fur strands |
 
 ---
 

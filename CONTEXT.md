@@ -63,6 +63,12 @@
    - Uses multi-level Laplacian pyramid foreground estimation (Germer et al., 2020 via `pymatting`) executed directly on the post-guided-filter continuous alpha matte.
    - $C^1$ Continuous Core Preservation: pixels with $\alpha \ge 0.98$ strictly preserve 100% original camera sensor pixels, while transition pixels ($0.02 < \alpha < 0.98$) are unmixed to true foreground color.
    - Added `Color Decontam` checkbox to top control bar (enabled by default) with instant auto-reprocess on toggle.
+8. **Spatially-Varying Local Background Field (`compute_local_background_field`):**
+   - Replaces the single global border median with an exact $O(N)$ Euclidean Distance Transform nearest-neighbor propagation field.
+   - Prevents studio lighting gradients, vignettes, and shadows from confusing the webbing suppression and detail recovery filters, cleanly purging background pockets trapped in hair curls and handles.
+9. **Closed-Form Alpha Matting (`refine_alpha_matting`):**
+   - Levin et al. Closed-Form Matting solving the Matting Laplacian over an adaptive trimap ($0.05 < \alpha < 0.95$).
+   - Added `Studio Matting` toggle to top control bar for human portraits, pets, and fine fur.
 ---
 
 ## 5. File Structure
