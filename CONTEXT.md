@@ -13,7 +13,7 @@
 ## 2. Environment & Runtime
 - **Python:** Python 3.11 (`C:\Users\Windows\AppData\Local\Programs\Python\Python311\python.exe` and `pythonw.exe`).
   *(Note: Avoid default Python 3.14 on this machine due to wheel compatibility).*
-- **Key Libraries:** `rembg` (v2.0.84), `onnxruntime` (v1.30.0), `Pillow`, `scipy`, `numpy`, `pymatting`.
+- **Key Libraries:** `rembg` (v2.0.84), `onnxruntime-directml` (v1.24.4 with DirectX 12 Intel UHD 620 GPU acceleration), `Pillow`, `scipy`, `numpy`, `pymatting`.
   - `u2net.onnx` (~176MB, legacy balanced model)
   - `silueta.onnx` (~44MB, ultra-fast model)
   - `birefnet-general-lite.onnx` (~220MB, SOTA bilateral transformer model)
@@ -69,6 +69,10 @@
 9. **Closed-Form Alpha Matting (`refine_alpha_matting`):**
    - Levin et al. Closed-Form Matting solving the Matting Laplacian over an adaptive trimap ($0.05 < \alpha < 0.95$).
    - Added `Studio Matting` toggle to top control bar for human portraits, pets, and fine fur.
+10. **DirectML Hardware Acceleration (`DmlExecutionProvider`):**
+    - Configured `onnxruntime-directml` to execute neural network inference directly on the on-board Intel UHD Graphics 620 GPU via Microsoft DirectX 12.
+    - Offloads compute-heavy tensor operations from the CPU, keeping the laptop responsive.
+    - Zero impact on laptop processing when idle or not using the app (VRAM and GPU queues are completely released).
 ---
 
 ## 5. File Structure

@@ -66,7 +66,17 @@ def get_session(model_name: str):
         opts.inter_op_num_threads = 1
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sessions[model_name] = new_session(model_name, sess_opts=opts)
+
+        available_providers = ort.get_available_providers()
+        providers = []
+        if "DmlExecutionProvider" in available_providers:
+            providers.append("DmlExecutionProvider")
+        if "CPUExecutionProvider" in available_providers:
+            providers.append("CPUExecutionProvider")
+        if not providers:
+            providers = None
+
+        sessions[model_name] = new_session(model_name, sess_opts=opts, providers=providers)
     return sessions[model_name]
 
 HTML_TEMPLATE = """<!DOCTYPE html>
