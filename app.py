@@ -106,16 +106,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 10px 20px;
+    padding: 10px 16px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
   }
 
   .brand {
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-shrink: 0;
   }
 
   .brand img.app-logo {
@@ -142,7 +145,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .top-controls {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
+    flex-wrap: wrap;
   }
 
   .model-select-group {
@@ -151,6 +155,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     gap: 8px;
     font-size: 0.85rem;
     color: var(--text-muted);
+    flex-shrink: 1;
   }
 
   select {
@@ -162,6 +167,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     font-size: 0.85rem;
     outline: none;
     cursor: pointer;
+    max-width: 240px;
+    text-overflow: ellipsis;
   }
   select:focus { border-color: var(--border-accent); }
 
@@ -172,8 +179,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     font-size: 0.85rem;
     color: var(--text-muted);
     cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
   }
 
+  @media (max-width: 850px) {
+    header { padding: 8px 12px; }
+    .brand-tag { display: none; }
+    select { max-width: 190px; }
+    .top-controls { gap: 10px; }
+  }
+
+  @media (max-width: 600px) {
+    .model-select-group label { display: none; }
+    select { max-width: 150px; }
+    .top-controls { width: 100%; justify-content: flex-start; }
+  }
   .auto-copy-toggle input {
     accent-color: var(--primary);
     cursor: pointer;
@@ -747,6 +768,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <option value="2">Deep Defringe (Strong Shadows)</option>
         <option value="0">Natural (Raw)</option>
       </select>
+    </div>
+
     <label class="auto-copy-toggle" title="Repairs false interior holes on solid subjects (uncheck for hollow objects like headphones or mug handles)">
       <input type="checkbox" id="recoverHolesCheck" checked>
       <span>Solid Subject</span>
