@@ -179,9 +179,19 @@ To allow instant touch-ups without tedious manual pixel tracing, we built client
 
 ---
 
-## 6. Next Architectural Frontiers
+## 6. Packshot Prior Roadmap & Next Architectural Frontiers
 
-1. **ViTMatte-Small Integration:** `rembg` includes a 109MB Vision Transformer matting refiner (`vitmatte-small-distinctions-646.onnx`) that can be added as an optional high-precision toggle for intricate human hair and pet fur.
-2. **Hardware Acceleration (DirectML / OpenVINO):** Utilizing the on-board Intel UHD 620 GPU via DirectX 12 / DirectML could potentially reduce BiRefNet inference from 180s down to under 10s.
-3. **Clipboard Auto-Watch (Ghost Mode):** Background worker thread monitoring Windows clipboard (`ImageGrab`) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
-4. **Auto-Crop to Subject:** Automatic bounding-box trimming (`Image.getbbox()`) with configurable padding to eliminate excessive transparent canvas margins.
+### 1. The E-Commerce Packshot vs. Generic SOD Semantic Gap
+- **The Challenge:** Generic salient object models (`isnet-general-use`, `u2net`, `silueta`) treat all high-contrast, focal details touching the subject as part of the foreground envelope (e.g. miniature beachgoers touching the sunscreen bottle).
+- **Commercial Solution (remove.bg):** Employs commercial packshot training data and geometric priors that distinguish smooth product silhouettes from environmental scene clutter.
+- **Architectural Roadmap for BG-Remover:**
+  1. **Quantized RMBG-1.4 (85MB INT8 ONNX):** E-commerce packshot model trained specifically on 12,000+ commercial product images to isolate products from cluttered backgrounds with near-zero CPU latency.
+  2. **Bounding Box / Focal Prior Prompting:** Allow users to draw a rapid bounding box or automatically detect the dominant product geometry to suppress touching scene distractors.
+  3. **Interactive Studio Rapid Touch-Up:** Use built-in **Magic Tap** (`M` key) which exploits the massive color distance ($\Delta E = 235$) between products and background props to purge touching clutter in a single $15\text{ms}$ click.
+
+### 2. Hardware Acceleration (DirectML / Intel UHD 620)
+- Utilizing the on-board Intel UHD 620 GPU via DirectX 12 (`onnxruntime-directml`) can reduce high-capacity transformer inference (BiRefNet Lite) from $\sim 180\text{s}$ down to under $10\text{s}$.
+
+### 3. Workflow Superpowers
+- **Clipboard Auto-Watch (Ghost Mode):** Background worker thread monitoring Windows clipboard (`ImageGrab`) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
+- **Auto-Crop to Subject:** Automatic bounding-box trimming (`Image.getbbox()`) with configurable padding to eliminate excessive transparent canvas margins.
