@@ -116,11 +116,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 10px 20px;
+    padding: 12px 24px;
     display: flex;
     align-items: center;
-    justify-content: flex-start;
-    flex-wrap: wrap;
+    justify-content: space-between;
     gap: 20px;
   }
 
@@ -760,40 +759,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="brand">
     <img src="/assets/icon.png" class="app-logo" alt="Logo">
     <div class="brand-title">BG Remover</div>
-    <div class="brand-tag">Offline App</div>
+    <div class="brand-tag">⚡ GPU Accelerated</div>
   </div>
 
   <div class="top-controls">
-    <div class="model-select-group">
-      <label for="modelSelect">AI Model:</label>
-      <select id="modelSelect">
-        <!-- populated dynamically -->
-      </select>
-    </div>
-
-    <div class="model-select-group">
-      <label for="trimSelect">Edge Defringe:</label>
-      <select id="trimSelect" title="Remove dark edge halos while keeping smooth anti-aliased curves">
-        <option value="1" selected>Smooth & Clean (Recommended)</option>
-        <option value="2">Deep Defringe (Strong Shadows)</option>
-        <option value="0">Natural (Raw)</option>
-      </select>
-    </div>
-
-    <label class="auto-copy-toggle" title="Eliminates background color bleed and chromatic halos from hair, fur, and semi-transparent edges">
-      <input type="checkbox" id="decontamCheck" checked>
-      <span>Color Decontam</span>
-    </label>
-
-    <label class="auto-copy-toggle" title="Learned Levin closed-form alpha matting for individual hair strands, fur, and delicate translucent fibers">
-      <input type="checkbox" id="mattingCheck">
-      <span>Studio Matting</span>
-    </label>
-    <label class="auto-copy-toggle" title="Only enable for solid camouflaged items (e.g. white shrimp on white plate). Leave off for cords, loops, and hollow objects.">
-      <input type="checkbox" id="recoverHolesCheck">
-      <span>Solid Subject</span>
-    </label>
-
     <label class="auto-copy-toggle" title="Automatically copy transparent PNG to clipboard once removal completes">
       <input type="checkbox" id="autoCopyCheck" checked>
       <span>Auto-copy result</span>
@@ -957,7 +926,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
-  const modelSelect = document.getElementById('modelSelect');
   const autoCopyCheck = document.getElementById('autoCopyCheck');
   const spinner = document.getElementById('spinner');
   const statusText = document.getElementById('statusText');
@@ -1014,53 +982,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     fetch('/api/ping').catch(() => {});
   }, 2500);
 
-  // Load models on startup
-  async function loadModels() {
-    try {
-      const res = await fetch('/api/models');
-      const data = await res.json();
-      modelSelect.innerHTML = '';
-      for (const [key, val] of Object.entries(data)) {
-        const opt = document.createElement('option');
-        opt.value = key;
-        opt.textContent = val.label;
-        if (val.default) opt.selected = true;
-        modelSelect.appendChild(opt);
-      }
-    } catch (e) {
-      console.error('Failed to load models list', e);
-    }
-  }
-  loadModels();
-
-  // Model & Defringe switch re-processes if image is active
-  modelSelect.addEventListener('change', () => {
-    if (currentFile) processImage(currentFile);
-  });
-  const trimSelect = document.getElementById('trimSelect');
-  if (trimSelect) {
-    trimSelect.addEventListener('change', () => {
-      if (currentFile) processImage(currentFile);
-    });
-  }
-  const recoverHolesCheck = document.getElementById('recoverHolesCheck');
-  if (recoverHolesCheck) {
-    recoverHolesCheck.addEventListener('change', () => {
-      if (currentFile) processImage(currentFile);
-    });
-  }
-  const decontamCheck = document.getElementById('decontamCheck');
-  if (decontamCheck) {
-    decontamCheck.addEventListener('change', () => {
-      if (currentFile) processImage(currentFile);
-    });
-  }
-  const mattingCheck = document.getElementById('mattingCheck');
-  if (mattingCheck) {
-    mattingCheck.addEventListener('change', () => {
-      if (currentFile) processImage(currentFile);
-    });
-  }
+  // Keep server alive while window is open
 
   // Paste Event
   window.addEventListener('paste', (e) => {
@@ -1112,7 +1034,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     workspace.style.display = 'flex';
     spinner.style.display = 'inline-block';
-    statusText.innerHTML = `Removing background using <b>${modelSelect.value}</b>...`;
+    statusText.innerHTML = `Removing background...`;
     metaInfo.textContent = '';
 
     const startTime = performance.now();
@@ -1120,12 +1042,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const timeoutId = setTimeout(() => controller.abort(), 35000);
 
     try {
-      const model = modelSelect.value;
-      const trim = document.getElementById('trimSelect')?.value ?? '1';
-      const decontam = document.getElementById('decontamCheck')?.checked ?? true;
-      const studioMatting = document.getElementById('mattingCheck')?.checked ?? false;
-      const recoverHoles = document.getElementById('recoverHolesCheck')?.checked ?? false;
-      const resp = await fetch(`/api/remove?model=${encodeURIComponent(model)}&trim=${encodeURIComponent(trim)}&decontaminate=${decontam}&recover_holes=${recoverHoles}&matting=${studioMatting}`, {
+      const resp = await fetch('/api/remove', {
         method: 'POST',
         body: file,
         signal: controller.signal

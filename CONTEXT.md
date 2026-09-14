@@ -73,6 +73,10 @@
     - Configured `onnxruntime-directml` to execute neural network inference directly on the on-board Intel UHD Graphics 620 GPU via Microsoft DirectX 12.
     - Offloads compute-heavy tensor operations from the CPU, keeping the laptop responsive.
     - Zero impact on laptop processing when idle or not using the app (VRAM and GPU queues are completely released).
+11. **Streamlined Auto-Pilot UX:**
+    - Replaced technical dropdowns (AI models, defringe, matting thresholds) with a clean consumer interface.
+    - Automatically runs the optimal GPU-accelerated pipeline under the hood (DirectML GPU + IS-Net + Local Background Field + Decontam + Optical Anti-Aliasing).
+    - Preserves the full View Toolbar (Split Slider, Side-by-Side, Cutout Only, Refine Brush Studio) and Backdrop Swatches untouched.
 ---
 
 ## 5. File Structure
