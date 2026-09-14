@@ -99,7 +99,9 @@ D:\BG-Remover\
 ├── requirements.txt       # Python dependencies
 ├── .gitignore             # Git ignore rules
 ├── LICENSE                # MIT License
-└── README.md              # Project documentation
+├── README.md              # Project documentation
+├── RESEARCH.md            # Deep CV research & remove.bg reverse-engineering documentation
+└── CONTEXT.md             # Project architecture & engineering context
 ```
 
 ---

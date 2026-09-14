@@ -75,5 +75,6 @@ D:\BG-Remover\
 ├── .gitignore             # Git ignore rules
 ├── LICENSE                # MIT License
 ├── README.md              # Documentation
+├── RESEARCH.md            # Deep CV research & remove.bg reverse-engineering documentation
 └── CONTEXT.md             # This context file for future sessions
 ```
