@@ -509,7 +509,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     border-radius: 12px;
     overflow: hidden;
     position: relative;
-    height: 520px;
+    height: min(520px, calc(100vh - 280px));
+    min-height: 380px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -809,7 +810,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <!-- Preview Stage -->
-    <div class="preview-stage" id="previewStage">
+    <div class="preview-stage backdrop-check-dark" id="previewStage">
       <!-- Split Slider View -->
       <div class="slider-container" id="sliderContainer">
         <!-- Layer 1: Cutout on backdrop -->
@@ -840,7 +841,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <div class="side-img-wrapper"><img id="sideCutout" alt="Cutout"></div>
         </div>
       </div>
-    </div>
 
       <!-- Interactive Brush Refine Stage -->
       <div class="brush-stage" id="brushStage">
@@ -849,7 +849,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div id="brushCursor" class="brush-cursor mode-erase"></div>
       </div>
-
+    </div>
     <!-- Action Bar -->
     <div class="action-bar">
       <button class="btn" onclick="document.getElementById('fileInput').click()">Upload Different Image</button>
@@ -1212,15 +1212,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
 
   async function initBrushCanvases() {
-    if (!imgOriginal.complete) {
-      await new Promise(r => { imgOriginal.onload = r; });
-    }
-    if (!imgCutout.complete) {
-      await new Promise(r => { imgCutout.onload = r; });
+    let w = 0, h = 0;
+    let origBmp = null;
+    let cutoutBmp = null;
+
+    try {
+      if (currentCutoutBlob) {
+        cutoutBmp = await createImageBitmap(currentCutoutBlob);
+        w = cutoutBmp.width;
+        h = cutoutBmp.height;
+      }
+      if (currentFile) {
+        origBmp = await createImageBitmap(currentFile);
+      }
+    } catch (e) {
+      console.warn('createImageBitmap failed, falling back to image elements', e);
     }
 
-    const w = imgOriginal.naturalWidth || imgOriginal.width;
-    const h = imgOriginal.naturalHeight || imgOriginal.height;
+    if (!w || !h) {
+      if (!imgOriginal.complete) {
+        await new Promise(r => { imgOriginal.onload = r; });
+      }
+      if (!imgCutout.complete) {
+        await new Promise(r => { imgCutout.onload = r; });
+      }
+      w = imgOriginal.naturalWidth || imgOriginal.width;
+      h = imgOriginal.naturalHeight || imgOriginal.height;
+    }
+
     if (!w || !h) return;
 
     brushCanvas.width = w;
@@ -1229,13 +1248,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     origCanvas.width = w;
     origCanvas.height = h;
     origCtx.clearRect(0, 0, w, h);
-    origCtx.drawImage(imgOriginal, 0, 0);
+    if (origBmp) {
+      origCtx.drawImage(origBmp, 0, 0);
+      if (origBmp.close) origBmp.close();
+    } else {
+      origCtx.drawImage(imgOriginal, 0, 0);
+    }
 
     scratchCanvas.width = w;
     scratchCanvas.height = h;
 
     brushCtx.clearRect(0, 0, w, h);
-    brushCtx.drawImage(imgCutout, 0, 0);
+    if (cutoutBmp) {
+      brushCtx.drawImage(cutoutBmp, 0, 0);
+      if (cutoutBmp.close) cutoutBmp.close();
+    } else {
+      brushCtx.drawImage(imgCutout, 0, 0);
+    }
 
     try {
       if (initialAIBitmap && initialAIBitmap.close) initialAIBitmap.close();
@@ -1256,8 +1285,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   function fitBrushToStage() {
     const stageRect = previewStage.getBoundingClientRect();
     const pad = 24;
-    const availW = Math.max(100, stageRect.width - pad * 2);
-    const availH = Math.max(100, stageRect.height - pad * 2);
+    const availW = Math.max(100, (stageRect.width || 800) - pad * 2);
+    const availH = Math.max(100, (stageRect.height || 480) - pad * 2);
 
     const w = brushCanvas.width;
     const h = brushCanvas.height;
