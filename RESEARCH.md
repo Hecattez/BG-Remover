@@ -1,199 +1,189 @@
-# Computer Vision Research & Architectural Progress: BG-Remover vs remove.bg
+# Research: Building a High-Accuracy Background Remover
+Author: Hecattez
+Started: 2026-09-11 | Last updated: 2026-09-14
 
-## 1. Executive Summary & Objective
+## Abstract / Purpose
+This research investigates the algorithmic, architectural, and mathematical requirements for building a 100% offline, zero-download desktop background removal application that achieves output parity with commercial market leaders (remove.bg, Photoshop Select Subject) on consumer laptop hardware (Intel Core i5-8250U, integrated Intel UHD 620 GPU, 8GB RAM). It identifies the core failure modes of off-the-shelf Salient Object Detection (SOD) models—such as jagged binarization, hair clumping, background color bleed, studio lighting traps, and touching contextual clutter—and systematically develops a cascaded CPU/DirectML-accelerated pipeline capable of delivering sub-pixel optical anti-aliasing, color spill decontamination, and closed-form alpha matting in under 2.5 seconds.
 
-The primary objective of **BG-Remover** is to provide a zero-download, privacy-preserving, 100% local desktop background removal utility that achieves output parity with market-leading commercial cloud services (**remove.bg**) while running on consumer laptop hardware (Intel Core i5-8250U CPU, 8GB RAM, integrated UHD 620 graphics) in under 2.5 seconds per image.
-
-This document records the empirical findings, algorithmic breakthroughs, reverse-engineered architecture of remove.bg, solved failure modes, and mathematical pipelines developed during this engineering cycle.
-
----
-
-## 2. Reverse-Engineering remove.bg: How State-of-the-Art Works
-
-Based on technical disclosures by **Kaleido** (the creators of remove.bg), peer-reviewed literature in computer vision, and discussions from the `r/computervision` engineering community, modern commercial background removal is **not** achieved via traditional chroma keying, simple color thresholding, or basic edge-detection filters. Instead, it relies on a **cascaded, multi-stage deep learning and image matting pipeline**:
-
-```mermaid
-graph TD
-    A[Raw Input Image] --> B[Stage 1: Deep Semantic Segmentation Network]
-    B --> C[Stage 2: Trimap Generation & Boundary Zone Isolation]
-    C --> D[Stage 3: Boundary-Aware Alpha Matting / Guided Refinement]
-    D --> E[Stage 4: Color Spill Decontamination / Background Unmixing]
-    E --> F[Stage 5: Spatial Distance-Aware Orphan Island Pruning]
-    F --> G[Final Transparent Cutout PNG]
-```
-
-### Stage 1: Deep Semantic Segmentation (The "Macro" Shape)
-- **Architecture:** High-capacity Fully Convolutional Networks (FCNs) or U-Net/BiRefNet encoder-decoder architectures with dense skip connections.
-- **Role:** Evaluates global semantic context (identifying *what* the subject is: human, product bottle, parachute, headset, vehicle) rather than color contrast.
-- **Topological Invariant:** Must resolve complex silhouettes and topological holes (genus $\ge 1$, e.g. interior loop of headphones, mug handles, parachute cord gaps).
-
-### Stage 2 & 3: Learned Alpha Matting (The "Micro" Boundaries)
-- **Problem:** Binary segmentation masks ($0$ or $1$) produce jagged, artificial "cookie-cutter" edges. Real physical optics exhibit motion blur, translucent materials, and sub-pixel details (whisps of hair, 1-pixel audio cords, parachute suspension lines).
-- **Solution:** Predicts a continuous fractional alpha matte ($\alpha \in [0.0, 1.0]$) governed by the alpha compositing equation:
-  $$\text{Color}_{\text{composite}} = \alpha \cdot \text{Foreground} + (1 - \alpha) \cdot \text{Background}$$
-- Uses local gradient/luminance guidance (or networks like **ViTMatte**) focused on the ambiguous boundary band (the trimap).
-
-### Stage 4: Color Spill Decontamination (Background Neutralization)
-- In real photos, background colors bounce onto the perimeter of the subject (e.g. green tint on skin or white clothing from a green wall, blue sky tinting white parachute strings).
-- Commercial services mathematically **unmix** the foreground color from the estimated background color along semi-transparent boundaries so cutouts do not exhibit chromatic halos when placed on new backdrops.
-
-### Stage 5: Connected Component & Orphan Island Suppression
-- Raw neural network probability heatmaps frequently emit low-confidence ($1\%–3\%$) sensor noise, dust specks, or border line artifacts.
-- Post-processing must discard disconnected background noise fragments while preserving real isolated details (e.g. earrings, detached straps, clothing fringes).
+## How to Read This Document
+This document is organized into three distinct parts. **Part 1 (Research Log)** is a strict, chronological engineering diary recording day-by-day investigations, literature readings, failure diagnoses, and empirical observations in append-only format. **Part 2 (Synthesized Findings)** reorganizes these findings thematically into a publishable computer vision reference covering architectures, accuracy challenges, dataset constraints, and terminology. **Part 3 (Conclusions So Far)** provides an up-to-date summary of the current state of the art and future directions as of the latest milestone.
 
 ---
 
-## 3. The 7 Major Failure Modes Identified & Solved
+# PART 1 — Research Log (chronological, diary-style)
 
-### Failure Mode 1: Topological Cavity & Hole Retention
-- **Symptom:** On images with hollow loops (e.g., green/beige headphones), the background inside the headband loop was retained as solid foreground ($\alpha = 254$).
-- **Root Cause:** 
-  1. The app defaulted to `u2net`. U2-Net was trained in 2020 on DUTS/SOD datasets at $320 \times 320$ resolution on single solid salient blobs; it cannot resolve high-frequency interior holes.
-  2. `Solid Subject` mode was checked by default, running `np.maximum(color, grayscale)` which forcibly filled interior cavities.
-- **Resolution:**
-  - Upgraded the default model to **IS-Net DIS5K** (`isnet-general-use`), operating at native $1024 \times 1024$ resolution with dichotomous segmentation.
-  - Hole alpha immediately dropped from $254$ to $0$ on the first pass.
-  - Refined `fuse_dual_pass_saliency` to check color distance against estimated background color: if an interior region matches the background color, the grayscale pass is forbidden from forcing it to be foreground.
-
----
-
-### Failure Mode 2: Sub-Pixel Staircase Binarization on High-Contrast Edges
-- **Symptom:** Zooming into solid objects (such as the blue gaming chair) revealed a jagged 1-bit staircase pattern along high-contrast curved boundaries.
-- **Root Cause:** 
-  - An earlier iteration of fine-detail recovery boosted all pixels where `mask > 1` and `color_dist > threshold` toward $255$.
-  - On solid objects with high contrast (e.g. blue chair on white background), the natural sub-pixel gradient ($0 \to 15 \to 60 \to 160 \to 255$) was binarized into an instantaneous $[0, 255]$ jump, destroying anti-aliasing.
-- **Resolution:**
-  - **Solid Boundary Protection:** Implemented morphological core detection (`solid_core = mask >= 180`) dilated by 4 pixels (`solid_boundary_zone`). Transition pixels within this buffer are strictly protected from binarization.
-  - **Fast $O(1)$ Guided Filter (`fast_guided_filter`):** Implemented an analytical Guided Filter (He et al., TPAMI) using photographic luminance as the guide surface. Converts quantized neural net edges into smooth sub-pixel optical anti-aliasing in $\sim 15\text{ms}$.
-  - Test verification:
-    ```text
-    Jagged mask:   [0,  0, 255, 255, 255]
-    Refined alpha: [0, 72, 155, 225, 255] (smooth optical curve)
-    ```
+## 2026-09-11 — Initial Project Scoping & Desktop Clipboard Architecture
+- **Source(s):** 
+  - Local AI Background Remover architecture research (`D:\BG-Remover`).
+  - Open-source background removal implementations (`rembg`, ONNX Runtime).
+- **What I read/found:**
+  - Standard user workflows for background removal suffer from heavy friction: users upload photos to commercial websites (e.g. remove.bg, Canva), wait for cloud queues, face resolution downscaling caps ($0.25\text{ MP}$ free tier), and download files back to their disk.
+  - An instant clipboard-in, clipboard-out utility (`Ctrl + V` in $\to$ transparent PNG written back to clipboard for `Ctrl + V` paste into Figma/Photoshop) eliminates this friction completely.
+  - Tested initial open-source models: `u2net` (176MB, legacy balanced) and `silueta` (44MB, ultra-lightweight).
+- **Key insight:**
+  - Running a local headless Python backend bound to an isolated Microsoft Edge application window (`--app=http://127.0.0.1:PORT`) provides a native desktop experience with zero terminal popups in `Alt + Tab`.
+- **Questions raised / things to dig into next:**
+  - Initial cutouts on `u2net` exhibit severe failure modes: hair looks blocky, thin cords (headphones) are wiped out, and hollow loops (headphone headbands, mug handles) are filled with solid background. How do commercial services solve these?
 
 ---
 
-### Failure Mode 3: Orphan Floating Specks & Border Line Artifacts
-- **Symptom:** On the parachute bottle image, our app produced a solid white vertical strip on the left border ($x=0$) and a floating white blob in mid-air on the right ($x=580$).
-- **Root Cause:**
-  - Faint neural network noise ($\alpha = 2$) on image margins was misclassified as a "thin structure" by detail recovery and boosted to $255$.
-- **Resolution:**
-  - **Distance-Aware Orphan Island Pruning (`clean_orphan_islands_distance`):**
-    Labels all connected components of $\alpha > 10$. Computes the Euclidean distance transform from the largest component (main subject).
-    Any small component ($< 3\%$ of main subject) located $> 30\text{px}$ away from the subject in empty background or on the image edge is recognized as noise and purged.
-  - Pruned all 4,096 artifact pixels in the parachute image while keeping the parachute, cords, and bottle $100\%$ intact.
+## 2026-09-14 — Reverse-Engineering remove.bg & Failure Modes Diagnosis
+- **Source(s):**
+  - Technical disclosures by Kaleido (creators of remove.bg).
+  - DIS5K paper: Qin et al., *"Highly Accurate Dichotomous Image Segmentation"*, ECCV 2022.
+  - Computer vision community analyses (`r/computervision`).
+- **What I read/found:**
+  - Commercial background removal is not simple chroma keying or raw thresholding; it relies on a cascaded 5-stage pipeline: Macro Semantic Segmentation $\to$ Boundary Trimap Generation $\to$ Learned/Guided Alpha Matting $\to$ Color Spill Decontamination $\to$ Distance-aware noise pruning.
+  - U2-Net ($320 \times 320$) fails on topological holes (genus $\ge 1$) because it was trained on DUTS/SOD on solid central blobs.
+  - Upgraded default model to **IS-Net DIS5K** (`isnet-general-use`), operating at native $1024 \times 1024$ resolution with dense skip connections, which immediately detects interior cavities on the first pass.
+  - Implemented Dual-Pass Saliency Fusion (`fuse_dual_pass_saliency`): fuses structural luminance (grayscale pass) with color saliency (color pass) via mathematical union to prevent white-on-white camouflage cutouts (e.g. white shrimp on white plate).
+- **Key insight:**
+  - Macro segmentation resolution is a hard bottleneck. Moving from $320\text{px}$ to $1024\text{px}$ dichotomous segmentation is essential for resolving fine contours and topological cavities.
+- **Questions raised / things to dig into next:**
+  - Boosting thin cords caused high-contrast curved boundaries (e.g. gaming chairs) to exhibit jagged staircase binarization. Faint model noise on borders produced orphan floating specks. How can edge anti-aliasing be restored optically?
 
 ---
 
-### Failure Mode 4: Background Webbing Between Thin Cords & Spokes
-- **Symptom:** In the parachute image, the sky between the suspension cords was clumped/webbed together instead of transparent.
-- **Root Cause:**
-  - In low-contrast gaps between closely spaced cords, the neural net mask merges them into a single envelope.
-  - `Solid Subject` being enabled by default prevented the AI from cutting out the sky pockets.
-- **Resolution:**
-  - **Background Cavity & Webbing Suppression (`suppress_background_webbing`):**
-    Samples background color from confirmed border pixels.
-    Detects non-solid pockets where color distance to background is small ($\Delta E < 26$) and suppresses alpha to $0$.
-  - Unchecked `Solid Subject` by default so automatic hole/cord separation works out of the box.
-  - Separated individual parachute cords cleanly with transparent gaps matching remove.bg.
+## 2026-09-14 — Optical Anti-Aliasing, Webbing Suppression & Interactive Studio
+- **Source(s):**
+  - Kaiming He, Jian Sun, Xiaoou Tang, *"Guided Image Filtering"*, IEEE TPAMI 2013.
+  - Breadth-First Search (BFS) gradient-barrier flood fills.
+- **What I read/found:**
+  - Implemented an analytical $O(1)$ Fast Guided Filter (`fast_guided_filter`): uses the photographic sensor's true optical luminance as a guide surface to align the neural network's quantized probability mask with continuous sub-pixel edge transitions in $\sim 15\text{ms}$.
+  - Implemented solid-core perimeter protection zones (`mask >= 180` dilated by 4px) to prevent binarization of curved silhouettes.
+  - Implemented Euclidean Distance Transform noise pruning (`clean_orphan_islands_distance`): purges small disconnected specks ($< 3\%$ of subject) located $> 30\text{px}$ away from the subject.
+  - Built the Interactive Refine Brush Studio in HTML5 Canvas:
+    - **✨ Smart AI Brush:** Rough strokes expand within brush radius, halting sharply at high-contrast subject boundaries via edge-barrier gradient stopping.
+    - **🪄 Magic Tap:** Single-click BFS flood fill bounded by local contrast step barriers ($\Delta p > \text{edge\_barrier}$) clearing up to 1,000,000 cavity pixels in $\sim 15\text{ms}$.
+    - **GPU Undo/Redo Engine:** `createImageBitmap` snapshots ($\sim 0.4\text{ms}$) with 15-step history.
+- **Key insight:**
+  - Real camera optics never produce instantaneous $[0, 255]$ jumps; natural edges have continuous sub-pixel transitions. The Guided Filter restores true optical anti-aliasing without heavy computational overhead.
+- **Questions raised / things to dig into next:**
+  - Soft boundaries still retain the original background color cast (e.g. green tint from green screens, or bleached frosty fringes from white studio backdrops when placed on black).
 
 ---
 
-### Failure Mode 5: The 5-Minute Frozen Spinner (Server Lifecycle Bug)
-- **Symptom:** User pasted a new image, and the spinner spun indefinitely for 5 minutes without ever returning a result.
-- **Root Cause:**
-  - The Python server was **dead**.
-  - `launch_app_window` called `proc.wait()` on `msedge.exe`. Because Edge was already running on Windows, the launcher process handed off the URL to the main Edge process and terminated in $0.1\text{s}$.
-  - The main Python thread reached `server.shutdown()` and exited.
-  - The browser window was attempting to `fetch('/api/remove')` on a dead port (`7860`), hanging indefinitely with no client-side timeout.
-- **Resolution:**
-  - Decoupled server lifecycle: main thread now blocks on `shutdown_event.wait()`.
-  - Added `/api/exit` triggered by `window.addEventListener('beforeunload', () => navigator.sendBeacon('/api/exit'))` so Python only shuts down when the window actually closes.
-  - Extended inactivity watchdog from $8\text{s}$ to $60\text{s}$.
-  - Wrapped `fetch` in `processImage` with an `AbortController` ($35\text{s}$ timeout) to prevent endless UI hangs.
-  - Pre-warmed `isnet-general-use` in background thread on launch for zero-lag first paste.
-
-
----
-
-### Failure Mode 6: Chromatic Color Spill & Edge Halos (Background Bleed on Soft Boundaries)
-- **Symptom:** Placing cutouts onto contrasting backgrounds (e.g. cutting out a white/golden dog from a white studio backdrop and pasting it onto dark/black surfaces, or green-screen subjects pasted onto white) revealed unsightly chromatic fringes and frosted halos along semi-transparent fur, hair, and anti-aliased silhouettes.
-- **Root Cause:**
-  - In the optical compositing equation $C = \alpha \cdot F + (1 - \alpha) \cdot B$, transition boundary pixels ($0.02 < \alpha < 0.98$) contain a linear mixture of foreground color $F$ and background light $B$.
-  - Without foreground unmixing, the raw background color $B$ remained baked into the RGB channels of the PNG cutout. When composited over a new backdrop $B_{\text{new}}$, the old background bled through: $C_{\text{new}} = \alpha \cdot C + (1 - \alpha) \cdot B_{\text{new}}$.
-- **Resolution:**
-  - **Multi-Level Laplacian Pyramid Decontamination (`decontaminate_color_spill`):**
-    Integrated fast multi-level foreground estimation (Germer et al., 2020 via `pymatting`) running directly on the post-refinement continuous alpha matte $\alpha_{\text{clean}}$.
-  - **$C^1$ Continuous Boundary Core Protection:**
-    To guarantee zero degradation of subject micro-textures, solid interior core pixels ($\alpha \ge 0.98$) retain $100\%$ untouched camera sensor pixels. A continuous blend function $\text{weight} = \text{clip}((\alpha - 0.85) / 0.13, 0.0, 1.0)$ smoothly transitions the decontaminated boundaries into the solid core without visible seams or color banding.
-  - **Empirical Validation:**
-    - **Green Screen Test:** Raw edge RGB $[109.4, 169.5, 39.5]$ (heavy green bleed) was mathematically restored to $[199.0, 119.0, 49.0]$, matching the true subject color $[200, 120, 50]$ within $\pm 1$ unit.
-    - **Dog Fur on White Background:** Bleached edge RGB $[227.7, 204.6, 189.0] \to$ rich warm fur $[190.1, 138.6, 104.6]$, completely eliminating milky white halos when pasted on black.
+## 2026-09-14 — Color Spill Decontamination & Foreground Unmixing
+- **Source(s):**
+  - Germer et al., *"Fast Multi-Level Foreground Estimation for Images and Videos"*, IEEE Transactions on Pattern Analysis and Machine Intelligence, 2020.
+  - PyMatting library (`pymatting.estimate_foreground_ml`).
+- **What I read/found:**
+  - In the optical compositing equation $C = \alpha \cdot F + (1 - \alpha) \cdot B$, semi-transparent boundary pixels ($0.02 < \alpha < 0.98$) contain a linear mixture of foreground color $F$ and background light $B$.
+  - Discovered that previous iterations were discarding decontamination and passing raw contaminated RGB into the cutout PNG, resulting in chromatic halos when cutouts were pasted onto dark or contrasting backdrops.
+  - Implemented `decontaminate_color_spill`: solves a multi-level Laplacian pyramid foreground estimation system that diffuses solid core foreground colors into the transition band while mathematically canceling the background color.
+  - Enforced $C^1$ continuous core preservation: pixels with $\alpha \ge 0.98$ retain $100\%$ untouched camera sensor pixels, while boundary pixels blend smoothly via $\text{weight} = \text{clip}((\alpha - 0.85) / 0.13, 0.0, 1.0)$.
+- **Key insight:**
+  - Decontamination must run *after* all alpha refinements (guided filter, defringing), unmixing the final high-resolution matte. Validated on synthetic green screen ($[109, 170, 39] \to [199, 119, 49]$) and dog fur on white ($[228, 205, 189] \to [190, 139, 105]$ on black composite).
+- **Questions raised / things to dig into next:**
+  - Real portrait tests revealed trapped orange slabs in hair cavities, and complex scenes (sunscreen on beach) retained touching beachgoers. Why did the algorithm fail to clear the cavity?
 
 ---
 
-### Failure Mode 7: Studio Lighting Gradients & Enclosed Hair Cavities (Global Background Fallacy)
-- **Symptom:** In portrait photography shot on studio backdrops (such as the blonde woman on an amber/orange studio backdrop), large solid slabs of the background remained trapped between hair curls and around the neck as opaque foreground.
-- **Root Cause:**
-  - The earlier implementation sampled a single global median background color strictly from the image's outermost border edges.
-  - In real studio photography, backdrops are rarely flat uniform planes: vignetting darkens the outer corners, while key and fill lights brightly illuminate the backdrop directly behind the subject's head.
-  - Because the bright orange backdrop behind her head deviated substantially from the dark vignetted border color ($\Delta E > 80$), both webbing suppression and fine-detail recovery falsely classified the background pocket as a "high-contrast foreground detail" and boosted it to solid opacity.
-- **Resolution:**
-  - **Spatially-Varying Local Background Field (`compute_local_background_field`):**
-    Computes an exact Euclidean Distance Transform nearest-neighbor propagation field in $O(N)$ vectorized time ($\sim 100\text{ms}$). Every pixel measures its color distance against the confirmed background immediately adjacent to it, correctly recognizing that the trapped pocket matches its local backdrop ($\Delta E < 15$) and purging it.
-  - **Closed-Form Alpha Matting (`refine_alpha_matting`):**
-    Integrated Levin et al. Closed-Form Alpha Matting solving the Matting Laplacian over an adaptive boundary trimap ($0.05 < \alpha < 0.95$). Converts coarse silhouette boundaries into soft, delicate individual hair strands with true optical transparency in $\sim 500\text{ms}$ on CPU.
----
-
-## 4. The Interactive Smart AI Studio (Smart Brush & Magic Tap)
-
-To allow instant touch-ups without tedious manual pixel tracing, we built client-side computer vision algorithms running inside the HTML5 Canvas at 60 FPS:
-
-### 1. 🪄 Magic Tap (One-Click Hole Remover)
-- User clicks once inside any enclosed hole (e.g. headphone loop).
-- Runs an edge-barrier Breadth-First Search (BFS) flood fill bounded by local contrast step barriers ($\Delta p > \text{edge\_barrier}$) and color variance from the clicked seed.
-- Clears up to 1,000,000 pixels in $\sim 15\text{ms}$–$110\text{ms}$, stopping at the object rim.
-
-### 2. ✨ Smart AI Brush (Auto-Snapping Brush)
-- Rough brush strokes sample seed colors and expand within the brush radius, stopping at high-contrast boundaries.
-- **Protection:** Even if the brush circle overlaps the subject, subject pixels are preserved because they lie across the edge barrier.
-- Uses sub-rectangle dirty updates (`putImageData(data, 0, 0, minX, minY, w, h)`) taking just **$0.2\text{ms}$ per stamp** for 60 FPS drag performance on multi-megapixel images.
+## 2026-09-14 — Local Background Fields & Levin Closed-Form Matting
+- **Source(s):**
+  - Anat Levin, Dani Lischinski, Yair Weiss, *"A Closed-Form Solution to Natural Image Matting"*, IEEE TPAMI 2008.
+  - Distance transform nearest-neighbor propagation (`scipy.ndimage.distance_transform_edt`).
+- **What I read/found:**
+  - **The Global Background Fallacy:** An earlier implementation sampled a single global median background color strictly from the image's outermost border edges. In studio portraiture, vignetting darkens borders while key lights illuminate the backdrop behind the head. Because the orange background behind the head deviated from the dark border ($\Delta E > 80$), the algorithm falsely classified the background pocket as "high-contrast foreground" and boosted it to opacity.
+  - Implemented `compute_local_background_field`: uses $O(N)$ Euclidean Distance Transform propagation ($\sim 100\text{ms}$) so every pixel measures color distance against the background *immediately surrounding it*.
+  - Implemented Closed-Form Alpha Matting (`refine_alpha_matting`): builds an adaptive boundary trimap ($0.05 < \alpha < 0.95$) and solves the Levin Matting Laplacian linear system in $\sim 500\text{ms}$ on CPU, producing soft, continuous optical alpha for hair strands.
+- **Key insight:**
+  - Background color is a spatially-varying 2D vector field, not a scalar. Modeling local background propagation allows cavity suppression to eliminate enclosed background pockets matching local studio lighting.
+- **Questions raised / things to dig into next:**
+  - Can DirectML hardware acceleration leverage the on-board Intel UHD 620 GPU via DirectX 12 without impacting system responsiveness when idle?
 
 ---
 
-## 5. Empirical Performance & Benchmarks (Intel i5-8250U & Intel UHD 620 DirectML GPU)
+## 2026-09-14 — DirectML GPU Acceleration & Semantic Soft Segmentation Analysis
+- **Source(s):**
+  - Microsoft DirectML (`onnxruntime-directml` v1.24.4) via DirectX 12.
+  - Yagiz Aksoy, Tae-Hyun Oh, Sylvain Paris, Marc Pollefeys, Wojciech Matusik, *"Semantic Soft Segmentation"*, ACM Transactions on Graphics (SIGGRAPH 2018) / [NVIDIA Developer Blog](https://developer.nvidia.com/blog/this-ai-can-automatically-remove-the-background-from-a-photo/).
+  - Gidi Shperber, *"Background removal with deep learning"*, Towards Data Science 2017 / [Medium](https://medium.com/data-science/background-removal-with-deep-learning-c4f2104b3157).
+- **What I read/found:**
+  - **DirectML GPU Acceleration:** Upgraded runtime to `onnxruntime-directml`. Configured `DmlExecutionProvider` with automatic CPU fallback. Accelerated steady-state IS-Net inference from $1.79\text{s}$ to $1.62\text{s}$ on Intel UHD 620 GPU via DirectX 12 command queues. Offloads tensor math from CPU with 0% idle overhead and instantaneous VRAM release.
+  - **Semantic Soft Segmentation (Aksoy et al. 2018):** Proved that accurate soft transitions require fusing high-level semantic feature vectors (128D deep CNN features edge-aligned via Guided Filter) with low-level color/texture affinities (Matting Laplacian) via spectral graph decomposition. Identified why early methods were slow (1–2 minutes per photo) and how modern models (MODNet, ViTMatte) distill this into millisecond feed-forward passes.
+  - **greenScreen.AI Lessons (Shperber 2017):** Identified common segmentation failure modes: coarse ground-truth polygons in standard datasets (COCO) preventing sub-pixel hair learning; "bites" taken out of camouflaged clothing; failure of Conditional Random Fields (CRFs) to produce clean edges; and the persistent ambiguity of handheld objects and touching contextual props.
+  - **Streamlined Auto-Pilot UX:** Replaced technical dropdowns and checkboxes with a clean, consumer-appliance header (Brand + Auto-copy toggle) while preserving the full interactive View Toolbar (Split Slider, Side-by-Side, Cutout Only, Refine Brush Studio, Backdrops).
+- **Key insight:**
+  - Generic Salient Object Detection (SOD) models cannot distinguish commercial packaging from touching environmental scene clutter (e.g. miniature beachgoers touching a sunscreen bottle). Commercial services resolve this by pairing semantic packshot/portrait priors with boundary alpha matting.
+- **Questions raised / things to dig into next:**
+  - Quantized e-commerce packshot models (RMBG-1.4 INT8) and focal bounding-box prompting to automatically reject touching environmental clutter.
 
-| Model / Pipeline Stage | Model Size | Resolution | Execution Time | Output Parity vs remove.bg |
+---
+
+# PART 2 — Synthesized Findings (topic-organized, publishable)
+
+## 2.1 Techniques & Architectures
+
+| Technique | Approach | Solves | Source / References | Date Logged |
 | :--- | :--- | :--- | :--- | :--- |
-| **Legacy `u2net` (CPU)** | 176 MB | $320 \times 320$ | $\sim 0.72\text{s}$ | ❌ Fails on holes and thin cords |
-| **`silueta` (CPU)** | 42 MB | $320 \times 320$ | $\sim 1.02\text{s}$ | ❌ Fails on holes and thin cords |
-| **`isnet-general-use` (CPU Raw)** | 179 MB | $1024 \times 1024$ | $\sim 1.79\text{s}$ | ⚠️ Cuts holes, but cords faint |
-| **`isnet-general-use` (DirectML GPU)** | 179 MB | $1024 \times 1024$ | **$\sim 1.62\text{s}$** | **✅ Hardware-accelerated on Intel UHD 620 via DirectX 12** |
-| **Full BG-Remover Pipeline (Standard)** | 179 MB | $1024 \times 1024$ | **$\sim 1.85\text{s}$** | **✅ Matches remove.bg (Holes, cords, clean defringe, decontam)** |
-| **Full BG-Remover Pipeline (Studio Matting)** | 179 MB | $896 \times 1344$ | **$\sim 2.35\text{s}$** | **✅ Soft hair/fur matting via Levin Matting Laplacian** |
-| - *Fast Guided Filter Stage* | — | $1200 \times 900$ | $15\text{ms}$ | Eliminates staircase jaggedness |
-| - *Orphan Island Pruning Stage* | — | $1200 \times 900$ | $8\text{ms}$ | Prunes border strips and dust |
-| - *Webbing Suppression Stage* | — | $1200 \times 900$ | $12\text{ms}$ | Separates cords and spokes |
-|- *Color Spill Decontamination Stage* | — | $1000 \times 1000$ | $\sim 150\text{ms}$ | Unmixes & cancels background color reflections |
-|- *Local Background Field Propagation* | — | $1104 \times 736$ | $100\text{ms}$ | Spatially models studio lighting & gradients |
-|- *Closed-Form Alpha Matting Stage* | — | $896 \times 1344$ | $\sim 500\text{ms}$ | Levin matting Laplacian for hair/fur strands |
+| **Dichotomous Segmentation (DIS)** | High-resolution ($1024\text{px}$) deep FCN encoder-decoder with dense skip connections (`isnet-general-use`). | Macro silhouette extraction, genus $\ge 1$ topological cavities, thin structures. | Qin et al., ECCV 2022 | 2026-09-14 |
+| **Dual-Pass Saliency Fusion** | Mathematical union of color saliency and structural luminance saliency (`fuse_dual_pass_saliency`). | False dropouts on white-on-white camouflaged objects (white shirts, shrimp). | BG-Remover Research | 2026-09-14 |
+| **Fast Guided Image Filter** | Analytical $O(1)$ edge-preserving filter using photographic luminance as guide surface (`fast_guided_filter`). | Sub-pixel staircase jaggedness; aligns neural probability masks with true optical anti-aliasing. | He et al., IEEE TPAMI 2013 | 2026-09-14 |
+| **Euclidean Distance Island Pruning** | Connected component labeling combined with Euclidean distance transform from primary subject. | Disconnected sensor noise, floating dust specks, and peripheral border strips. | BG-Remover Research | 2026-09-14 |
+| **Multi-Level Foreground Estimation** | Multi-level Laplacian pyramid foreground unmixing (`decontaminate_color_spill`). | Chromatic halos, green-screen reflection spill, and bleached edges on contrasting backdrops. | Germer et al., IEEE TPAMI 2020 | 2026-09-14 |
+| **Spatially-Varying Local Background Field** | Nearest confirmed background pixel propagation via Euclidean Distance Transform indices. | Trapped cavities in studio lighting gradients, non-uniform backdrops, and vignettes. | BG-Remover Research | 2026-09-14 |
+| **Closed-Form Alpha Matting** | Adaptive boundary trimap generation followed by Levin Matting Laplacian linear solver. | Hair strand clumping, fur opacity, and semi-transparent boundary extraction. | Levin et al., IEEE TPAMI 2008 | 2026-09-14 |
+| **DirectML DirectX 12 Acceleration** | Native Windows DirectML execution provider (`DmlExecutionProvider`) on integrated Intel UHD 620 GPU. | CPU thermal throttling, slow inference times; offloads tensor multiplications to GPU. | Microsoft DirectML / ONNX Runtime | 2026-09-14 |
 
 ---
 
-## 6. Packshot Prior Roadmap & Next Architectural Frontiers
+## 2.2 Accuracy Challenges
 
-### 1. The E-Commerce Packshot vs. Generic SOD Semantic Gap
-- **The Challenge:** Generic salient object models (`isnet-general-use`, `u2net`, `silueta`) treat all high-contrast, focal details touching the subject as part of the foreground envelope (e.g. miniature beachgoers touching the sunscreen bottle).
-- **Commercial Solution (remove.bg):** Employs commercial packshot training data and geometric priors that distinguish smooth product silhouettes from environmental scene clutter.
-- **Architectural Roadmap for BG-Remover:**
-  1. **Quantized RMBG-1.4 (85MB INT8 ONNX):** E-commerce packshot model trained specifically on 12,000+ commercial product images to isolate products from cluttered backgrounds with near-zero CPU latency.
-  2. **Bounding Box / Focal Prior Prompting:** Allow users to draw a rapid bounding box or automatically detect the dominant product geometry to suppress touching scene distractors.
-  3. **Interactive Studio Rapid Touch-Up:** Use built-in **Magic Tap** (`M` key) which exploits the massive color distance ($\Delta E = 235$) between products and background props to purge touching clutter in a single $15\text{ms}$ click.
+### 1. Hair, Fur & Micro-Translucency
+- **Root Cause:** Standard semantic segmentation networks output discrete binary-like silhouettes ($0$ or $1$) because training masks are annotated with hard polygonal boundaries. Optical physics exhibits sub-pixel fractional coverage where a single pixel contains both hair fiber and background light.
+- **Solution:** Two-stage cascaded architecture. Stage 1 isolates the macro silhouette; Stage 2 constructs an adaptive boundary trimap ($0.05 < \alpha < 0.95$) and solves the Levin Matting Laplacian to estimate continuous fractional transparency ($\alpha \in [0.0, 1.0]$).
 
-### 2. Hardware Acceleration (DirectML / Intel UHD 620) - [IMPLEMENTED]
-- Upgraded runtime from standard `onnxruntime` to `onnxruntime-directml` (v1.24.4).
-- Executes inference on Intel(R) UHD Graphics 620 via Microsoft DirectX 12 (`DmlExecutionProvider`) with zero-overhead automatic CPU fallback.
-- Completely idle when the app is not actively processing: 0% GPU utilization and 100% VRAM release.
-### 3. Workflow Superpowers
-- **Clipboard Auto-Watch (Ghost Mode):** Background worker thread monitoring Windows clipboard (`ImageGrab`) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
-- **Auto-Crop to Subject:** Automatic bounding-box trimming (`Image.getbbox()`) with configurable padding to eliminate excessive transparent canvas margins.
+### 2. Chromatic Color Spill & Haloing
+- **Root Cause:** In the compositing equation $C = \alpha \cdot F + (1 - \alpha) \cdot B$, semi-transparent boundary pixels retain background color $B$ in their RGB channels. Pasting onto a contrasting backdrop produces colored fringes (e.g. green wall reflections or white frosted edges on black).
+- **Solution:** Multi-level Laplacian foreground unmixing (`decontaminate_color_spill`) mathematically cancels out $B$ on fractional pixels while strictly preserving $100\%$ original sensor RGB in the solid interior core ($\alpha \ge 0.98$).
+
+### 3. Studio Lighting Gradients & Trapped Cavities
+- **Root Cause:** Assuming background color is a single global scalar sampled from the image borders fails when backdrops have directional lighting, vignetting, or falloff. Background pockets enclosed by hair curls differ in color from the dark borders ($\Delta E > 80$), causing algorithms to misclassify them as foreground.
+- **Solution:** Spatially-varying Local Background Field (`compute_local_background_field`) propagates the nearest confirmed background RGB in $O(N)$ time ($\sim 100\text{ms}$), ensuring every cavity is evaluated against the background directly adjacent to it.
+
+### 4. Touching Contextual Scene Clutter (The Packshot Dilemma)
+- **Root Cause:** Generic Salient Object Detection (SOD) models treat all high-contrast, visually prominent shapes as foreground. When miniature beachgoers and umbrellas touch a sunscreen bottle, the network groups them into the same contiguous foreground envelope.
+- **Solution:** Commercial services rely on commercial catalog training sets (packshot priors) that recognize product packaging geometry. In-app human-in-the-loop overrides like **Magic Tap** utilize the massive color contrast between product and clutter ($\Delta E > 230$) to erase attached clutter in $\sim 15\text{ms}$.
+
+---
+
+## 2.3 Datasets Used in the Field
+
+| Dataset | Nature / Size | Strengths | Limitations for Alpha Matting |
+| :--- | :--- | :--- | :--- |
+| **COCO / COCO-Stuff** | ~120,000 images, 80+ object classes | Broad semantic coverage, real-world context | Coarse polygon annotations; no sub-pixel alpha or hair detail. |
+| **DUTS / SOD** | ~15,000 images | Standard salient object benchmark | Biased toward single solid salient foreground blobs; poor on genus $\ge 1$ holes. |
+| **DIS5K (DIS-Dataset)** | 5,470 ultra-high-resolution images | Extremely dense, intricate structural silhouettes ($1024\text{px}+$) | Focuses on structural dichotomous saliency; lacks packshot product priors. |
+| **Adobe Composition-1k / Distinctions-646** | 1,000+ foreground images with true alpha mattes | Gold standard for alpha matting and hair/fur evaluation | Primarily synthetic composites; requires trimap input. |
+| **BRIA Commercial Dataset** | 12,000+ licensed commercial product images | Specifically tailored for e-commerce packshots, apparel, and studio portraiture | Proprietary commercial dataset (used in RMBG models). |
+
+---
+
+## 2.4 Key Terms / Glossary
+
+- **Alpha Compositing Equation:** The linear optical model $C = \alpha \cdot F + (1 - \alpha) \cdot B$ describing how foreground color $F$ and background color $B$ combine under fractional opacity $\alpha$.
+- **Trimap:** A 3-class segmentation map partitioning an image into Definite Foreground ($\alpha = 1.0$), Definite Background ($\alpha = 0.0$), and Unknown Transition Zone ($\alpha = 0.5$) for alpha matting algorithms.
+- **Matting Laplacian:** A sparse affinity matrix introduced by Levin et al. based on the assumption that foreground and background colors in local image windows obey local linear color models.
+- **Guided Image Filter:** An $O(1)$ non-approximate edge-preserving smoothing filter that transfers structural edge details from a guidance image (luminance) onto a target image (alpha mask).
+- **DirectML:** A low-level DirectX 12 hardware acceleration API developed by Microsoft enabling GPU-accelerated neural network inference across diverse hardware (Intel, AMD, Nvidia).
+- **Color Spill Decontamination:** The process of mathematically unmixing and removing background color reflections from semi-transparent foreground pixels.
+- **Dichotomous Segmentation (DIS):** Fine-grained segmentation designed to identify highly accurate object boundaries and intricate topological holes in high-resolution imagery.
+
+---
+
+## 2.5 Open Questions / Gaps in Current Research
+
+1. **Lightweight E-Commerce Packshot Models on CPU:** How to achieve remove.bg-level packshot prior accuracy (rejecting touching beach sand, props, and surfaces) within an offline model under 100MB that executes in $< 1.5\text{s}$ on low-voltage laptop CPUs.
+2. **Quantized INT8 RMBG-1.4:** Evaluating whether an 85MB INT8 quantization of BRIA RMBG-1.4 maintains product edge precision while fitting comfortably inside integrated Intel UHD 620 memory limits.
+3. **Automated Semantic Routing:** Developing a zero-overhead pre-classifier that categorizes input images into *Portrait*, *Product*, or *General* to automatically dispatch specialized matting or packshot pipelines.
+
+---
+
+# PART 3 — Conclusions So Far
+
+*As of 2026-09-14, the most promising direction is:*
+
+1. **The Two-Stage Paradigm is Inviolable:** Single-stage neural networks inevitably compromise either between semantic understanding (macro shape) or boundary optical precision (hair/fur). A cascaded architecture pairing a high-resolution macro segmenter (`IS-Net DIS5K` accelerated via DirectML GPU) with an analytical boundary refiner (`Fast Guided Filter` / `Closed-Form Matting`) and post-refinement `Color Spill Decontamination` achieves commercial parity on studio and plain backgrounds.
+2. **Local Over Global Operations:** Global assumptions (such as a single border-derived background color or global thresholding) are the root cause of edge artifacts in studio photography. Spatially-varying fields (EDT background propagation, local gradient barriers) are necessary to handle real-world lighting gradients and vignetting.
+3. **Consumer Appliance UX:** Exposing internal algorithmic parameters (models, defringe radii, matting thresholds) creates cognitive friction for everyday users. The optimal product architecture encapsulates technical complexity into an automated auto-pilot pipeline while retaining interactive precision tools (Smart AI Brush, Magic Tap) for rapid edge-case overrides.
