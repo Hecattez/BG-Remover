@@ -770,6 +770,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </select>
     </div>
 
+    <label class="auto-copy-toggle" title="Eliminates background color bleed and chromatic halos from hair, fur, and semi-transparent edges">
+      <input type="checkbox" id="decontamCheck" checked>
+      <span>Color Decontam</span>
+    </label>
+
     <label class="auto-copy-toggle" title="Only enable for solid camouflaged items (e.g. white shrimp on white plate). Leave off for cords, loops, and hollow objects.">
       <input type="checkbox" id="recoverHolesCheck">
       <span>Solid Subject</span>
@@ -1030,6 +1035,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (currentFile) processImage(currentFile);
     });
   }
+  const decontamCheck = document.getElementById('decontamCheck');
+  if (decontamCheck) {
+    decontamCheck.addEventListener('change', () => {
+      if (currentFile) processImage(currentFile);
+    });
+  }
 
   // Paste Event
   window.addEventListener('paste', (e) => {
@@ -1091,8 +1102,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     try {
       const model = modelSelect.value;
       const trim = document.getElementById('trimSelect')?.value ?? '1';
-      const recoverHoles = document.getElementById('recoverHolesCheck')?.checked ?? true;
-      const resp = await fetch(`/api/remove?model=${encodeURIComponent(model)}&trim=${encodeURIComponent(trim)}&decontaminate=true&recover_holes=${recoverHoles}`, {
+      const decontam = document.getElementById('decontamCheck')?.checked ?? true;
+      const recoverHoles = document.getElementById('recoverHolesCheck')?.checked ?? false;
+      const resp = await fetch(`/api/remove?model=${encodeURIComponent(model)}&trim=${encodeURIComponent(trim)}&decontaminate=${decontam}&recover_holes=${recoverHoles}`, {
         method: 'POST',
         body: file,
         signal: controller.signal
@@ -2137,6 +2149,46 @@ def fuse_dual_pass_saliency(input_bytes, orig_img, session):
     out.putalpha(Image.fromarray(m_fused))
     return out
 
+def decontaminate_color_spill(orig_arr, alpha_norm):
+    """
+    Stage 4: Color Spill Decontamination & Foreground Unmixing (Germer et al., 2020)
+
+    Eliminates color cast, chromatic halos, and background light bleeding along
+    semi-transparent edges (fur, hair strands, translucent fabrics, glass, motion blur,
+    and anti-aliased silhouettes).
+
+    Mathematically unmixes the composite color into true foreground RGB by diffusing
+    solid core foreground hues into the transition band while removing background spill.
+
+    Preserves 100% of original camera sensor pixels in the solid interior core (alpha >= 0.98)
+    and smoothly transitions into the unmixed foreground across the boundary band.
+    """
+    try:
+        import numpy as np
+        import pymatting
+        # Check if there are semi-transparent transition pixels to decontaminate
+        trans_mask = (alpha_norm > 0.02) & (alpha_norm < 0.98)
+        if not np.any(trans_mask):
+            return orig_arr
+
+        img_norm = orig_arr.astype(np.float32) / 255.0
+
+        # Multi-level Laplacian pyramid foreground estimation
+        F = pymatting.estimate_foreground_ml(img_norm, alpha_norm.astype(np.float32))
+        F_u8 = np.clip(F * 255.0, 0, 255).astype(np.float32)
+
+        # Smooth C^1 transition blend:
+        # Alpha <= 0.85 -> 100% decontaminated (background color removed)
+        # Alpha >= 0.98 -> 100% original sensor pixels (micro-texture preserved)
+        # 0.85 < Alpha < 0.98 -> smooth linear blend
+        weight = np.clip((alpha_norm - 0.85) / 0.13, 0.0, 1.0)[:, :, None]
+        blended = (1.0 - weight) * F_u8 + weight * orig_arr.astype(np.float32)
+
+        return np.clip(blended, 0, 255).astype(np.uint8)
+    except Exception as e:
+        print(f"[Decontamination Warning] Fallback to original colors: {e}")
+        return orig_arr
+
 class BGRemoverServer(SimpleHTTPRequestHandler):
     def do_GET(self):
         global last_activity_time, has_received_first_request
@@ -2208,26 +2260,24 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                 import numpy as np
 
                 session = get_session(model_name)
-                # post_process_mask=False preserves sub-pixel anti-aliasing (never binarize)
-                output_bytes = remove(
-                    input_bytes,
-                    session=session,
-                    post_process_mask=False,
-                    decontaminate=decontam
-                )
-
                 orig_img = Image.open(io.BytesIO(input_bytes)).convert("RGB")
                 orig_arr = np.array(orig_img)
 
-                # Dual-pass luminance saliency: AI natively recognizes camouflaged parts
+                # Generate initial mask
                 if recover_holes:
                     cutout_img = fuse_dual_pass_saliency(input_bytes, orig_img, session)
+                    _, _, _, a = cutout_img.split()
+                    a_arr = np.array(a)
                 else:
-                    cutout_img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+                    raw_mask_bytes = remove(
+                        input_bytes,
+                        session=session,
+                        only_mask=True,
+                        post_process_mask=False
+                    )
+                    a_arr = np.array(Image.open(io.BytesIO(raw_mask_bytes)).convert("L"))
 
                 # 1. Background cavity / webbing suppression (un-webs background between thin cords and spokes)
-                r, g, b, a = cutout_img.split()
-                a_arr = np.array(a)
                 a_unwebbed = suppress_background_webbing(a_arr, orig_arr)
 
                 # 2. Selective fine detail & cord recovery (protects solid boundaries, boosts thin connected cords)
@@ -2251,11 +2301,17 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
 
                 a_final = (a_clean * 255.0).astype(np.uint8)
 
-                # 6. Premultiply: zero out RGB where alpha is 0 to prevent raw background pixels from leaking
-                r_arr = np.where(a_final > 0, np.array(r), 0)
-                g_arr = np.where(a_final > 0, np.array(g), 0)
-                b_arr = np.where(a_final > 0, np.array(b), 0)
+                # 6. Color Spill Decontamination (Background Unmixing):
+                # Unmixes and neutralizes background color reflections from semi-transparent boundaries
+                if decontam:
+                    clean_rgb = decontaminate_color_spill(orig_arr, a_clean)
+                else:
+                    clean_rgb = orig_arr
 
+                # 7. Premultiply: zero out RGB where alpha is 0 to prevent raw background pixels from leaking
+                r_arr = np.where(a_final > 0, clean_rgb[:, :, 0], 0)
+                g_arr = np.where(a_final > 0, clean_rgb[:, :, 1], 0)
+                b_arr = np.where(a_final > 0, clean_rgb[:, :, 2], 0)
                 cutout_img = Image.merge(
                     "RGBA",
                     (

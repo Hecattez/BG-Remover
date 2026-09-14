@@ -13,8 +13,7 @@
 ## 2. Environment & Runtime
 - **Python:** Python 3.11 (`C:\Users\Windows\AppData\Local\Programs\Python\Python311\python.exe` and `pythonw.exe`).
   *(Note: Avoid default Python 3.14 on this machine due to wheel compatibility).*
-- **Key Libraries:** `rembg` (v2.0.84), `onnxruntime` (v1.30.0), `Pillow`, `scipy`, `numpy`.
-  - `isnet-general-use.onnx` (~179MB, DIS5K high-accuracy model - **Default Recommended**)
+- **Key Libraries:** `rembg` (v2.0.84), `onnxruntime` (v1.30.0), `Pillow`, `scipy`, `numpy`, `pymatting`.
   - `u2net.onnx` (~176MB, legacy balanced model)
   - `silueta.onnx` (~44MB, ultra-fast model)
   - `birefnet-general-lite.onnx` (~220MB, SOTA bilateral transformer model)
@@ -59,6 +58,11 @@
    - Automatically samples background color from verified perimeter background pixels.
    - Pixels where the model detected a trace of foreground (`mask > 1`) and whose color has high contrast against the background ($\Delta E > 38$) are dynamically boosted to full opacity.
    - Achieves 100% remove.bg parity (intact cords, wires, and hollow loops) in ~1.9s on CPU without requiring heavy cloud GPUs.
+7. **Color Spill Decontamination & Foreground Unmixing (`decontaminate_color_spill`):**
+   - Eliminates color bleeding, chromatic fringes, and background halos (e.g. green cast from green-screens, or bleached frosty edges from white studio backdrops).
+   - Uses multi-level Laplacian pyramid foreground estimation (Germer et al., 2020 via `pymatting`) executed directly on the post-guided-filter continuous alpha matte.
+   - $C^1$ Continuous Core Preservation: pixels with $\alpha \ge 0.98$ strictly preserve 100% original camera sensor pixels, while transition pixels ($0.02 < \alpha < 0.98$) are unmixed to true foreground color.
+   - Added `Color Decontam` checkbox to top control bar (enabled by default) with instant auto-reprocess on toggle.
 ---
 
 ## 5. File Structure

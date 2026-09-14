@@ -26,6 +26,8 @@ A fast, private, 100% offline background removal desktop application tailored fo
   - Automatically restores thin audio cords, fine wires, and hair strands without wiping them out during defringing, achieving remove.bg parity in ~1.9s on CPU.
 - **🪄 Anti-Aliased Sub-Pixel Defringing:**
   - Removes dark color bleeding and shadow halos without destroying edge anti-aliasing or causing stair-stepped jaggedness.
+- **🎨 Color Spill Decontamination (Background Unmixing):**
+  - Mathematically eliminates background color casts, green-screen reflection halos, and bleached frosty edges along semi-transparent fur, hair, and soft silhouettes using multi-level Laplacian foreground estimation.
 - **🔍 Interactive Comparison & Live Backdrops:**
   - Split Before/After comparison slider.
   - Side-by-Side and Cutout Only view modes.

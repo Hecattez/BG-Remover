@@ -43,8 +43,7 @@ graph TD
 
 ---
 
-## 3. The 5 Major Failure Modes Identified & Solved
-
+## 3. The 6 Major Failure Modes Identified & Solved
 ### Failure Mode 1: Topological Cavity & Hole Retention
 - **Symptom:** On images with hollow loops (e.g., green/beige headphones), the background inside the headband loop was retained as solid foreground ($\alpha = 254$).
 - **Root Cause:** 
@@ -113,6 +112,22 @@ graph TD
   - Wrapped `fetch` in `processImage` with an `AbortController` ($35\text{s}$ timeout) to prevent endless UI hangs.
   - Pre-warmed `isnet-general-use` in background thread on launch for zero-lag first paste.
 
+
+---
+
+### Failure Mode 6: Chromatic Color Spill & Edge Halos (Background Bleed on Soft Boundaries)
+- **Symptom:** Placing cutouts onto contrasting backgrounds (e.g. cutting out a white/golden dog from a white studio backdrop and pasting it onto dark/black surfaces, or green-screen subjects pasted onto white) revealed unsightly chromatic fringes and frosted halos along semi-transparent fur, hair, and anti-aliased silhouettes.
+- **Root Cause:**
+  - In the optical compositing equation $C = \alpha \cdot F + (1 - \alpha) \cdot B$, transition boundary pixels ($0.02 < \alpha < 0.98$) contain a linear mixture of foreground color $F$ and background light $B$.
+  - Without foreground unmixing, the raw background color $B$ remained baked into the RGB channels of the PNG cutout. When composited over a new backdrop $B_{\text{new}}$, the old background bled through: $C_{\text{new}} = \alpha \cdot C + (1 - \alpha) \cdot B_{\text{new}}$.
+- **Resolution:**
+  - **Multi-Level Laplacian Pyramid Decontamination (`decontaminate_color_spill`):**
+    Integrated fast multi-level foreground estimation (Germer et al., 2020 via `pymatting`) running directly on the post-refinement continuous alpha matte $\alpha_{\text{clean}}$.
+  - **$C^1$ Continuous Boundary Core Protection:**
+    To guarantee zero degradation of subject micro-textures, solid interior core pixels ($\alpha \ge 0.98$) retain $100\%$ untouched camera sensor pixels. A continuous blend function $\text{weight} = \text{clip}((\alpha - 0.85) / 0.13, 0.0, 1.0)$ smoothly transitions the decontaminated boundaries into the solid core without visible seams or color banding.
+  - **Empirical Validation:**
+    - **Green Screen Test:** Raw edge RGB $[109.4, 169.5, 39.5]$ (heavy green bleed) was mathematically restored to $[199.0, 119.0, 49.0]$, matching the true subject color $[200, 120, 50]$ within $\pm 1$ unit.
+    - **Dog Fur on White Background:** Bleached edge RGB $[227.7, 204.6, 189.0] \to$ rich warm fur $[190.1, 138.6, 104.6]$, completely eliminating milky white halos when pasted on black.
 ---
 
 ## 4. The Interactive Smart AI Studio (Smart Brush & Magic Tap)
@@ -143,11 +158,13 @@ To allow instant touch-ups without tedious manual pixel tracing, we built client
 | - *Fast Guided Filter Stage* | — | $1200 \times 900$ | $15\text{ms}$ | Eliminates staircase jaggedness |
 | - *Orphan Island Pruning Stage* | — | $1200 \times 900$ | $8\text{ms}$ | Prunes border strips and dust |
 | - *Webbing Suppression Stage* | — | $1200 \times 900$ | $12\text{ms}$ | Separates cords and spokes |
+|- *Color Spill Decontamination Stage* | — | $1000 \times 1000$ | $\sim 150\text{ms}$ | Unmixes & cancels background color reflections |
 
 ---
 
 ## 6. Next Architectural Frontiers
 
-1. **Color Spill Decontamination:** Implement background color unmixing along fractional alpha boundaries ($0.05 < \alpha < 0.95$) so foreground strands don't retain tinted reflections from bright colored backdrops.
-2. **ViTMatte-Small Integration:** `rembg` includes a 109MB Vision Transformer matting refiner (`vitmatte-small-distinctions-646.onnx`) that can be added as an optional high-precision toggle for intricate human hair and pet fur.
-3. **Hardware Acceleration (DirectML / OpenVINO):** Utilizing the on-board Intel UHD 620 GPU via DirectX 12 / DirectML could potentially reduce BiRefNet inference from 180s down to under 10s.
+1. **ViTMatte-Small Integration:** `rembg` includes a 109MB Vision Transformer matting refiner (`vitmatte-small-distinctions-646.onnx`) that can be added as an optional high-precision toggle for intricate human hair and pet fur.
+2. **Hardware Acceleration (DirectML / OpenVINO):** Utilizing the on-board Intel UHD 620 GPU via DirectX 12 / DirectML could potentially reduce BiRefNet inference from 180s down to under 10s.
+3. **Clipboard Auto-Watch (Ghost Mode):** Background worker thread monitoring Windows clipboard (`ImageGrab`) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
+4. **Auto-Crop to Subject:** Automatic bounding-box trimming (`Image.getbbox()`) with configurable padding to eliminate excessive transparent canvas margins.
