@@ -54,12 +54,18 @@ AVAILABLE_MODELS = {
 # Cache sessions in memory
 sessions = {}
 
+import multiprocessing
+
 def get_session(model_name: str):
     if model_name not in AVAILABLE_MODELS:
         model_name = "isnet-general-use"
     if model_name not in sessions:
-        t0 = time.time()
-        sessions[model_name] = new_session(model_name)
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = min(4, multiprocessing.cpu_count())
+        opts.inter_op_num_threads = 1
+        opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sessions[model_name] = new_session(model_name, sess_opts=opts)
     return sessions[model_name]
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -1055,6 +1061,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     metaInfo.textContent = '';
 
     const startTime = performance.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 35000);
 
     try {
       const model = modelSelect.value;
@@ -1062,8 +1070,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const recoverHoles = document.getElementById('recoverHolesCheck')?.checked ?? true;
       const resp = await fetch(`/api/remove?model=${encodeURIComponent(model)}&trim=${encodeURIComponent(trim)}&decontaminate=true&recover_holes=${recoverHoles}`, {
         method: 'POST',
-        body: file
+        body: file,
+        signal: controller.signal
       });
+      clearTimeout(timeoutId);
 
       if (!resp.ok) {
         const errText = await resp.text();
@@ -1092,8 +1102,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         statusText.innerHTML = `<span class="toast">✓ Background removed in ${elapsed}s!</span>`;
       }
     } catch (err) {
+      clearTimeout(timeoutId);
       spinner.style.display = 'none';
-      statusText.innerHTML = `<span style="color:#ef4444;">Error: ${err.message}</span>`;
+      if (err.name === 'AbortError') {
+        statusText.innerHTML = `<span style="color:#ef4444;">Processing timed out (35s). Please try again or choose a faster model.</span>`;
+      } else {
+        statusText.innerHTML = `<span style="color:#ef4444;">Connection error: ${err.message}. Please restart the app.</span>`;
+      }
       console.error(err);
     }
   }
@@ -1887,6 +1902,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   window.addEventListener('resize', () => {
     if (currentViewMode === 'brush') fitBrushToStage();
   });
+
+  // Notify backend to cleanly exit when browser window is closed
+  window.addEventListener('beforeunload', () => {
+    try {
+      navigator.sendBeacon('/api/exit');
+    } catch (e) {}
+  });
 </script>
 </body>
 </html>
@@ -2048,6 +2070,12 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"pong")
+        elif parsed.path == "/api/exit":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"shutting down")
+            trigger_shutdown()
         else:
             self.send_response(404)
             self.end_headers()
@@ -2060,7 +2088,7 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/remove":
             qs = parse_qs(parsed.query)
-            model_name = qs.get("model", ["u2net"])[0]
+            model_name = qs.get("model", ["isnet-general-use"])[0]
             trim_px = int(qs.get("trim", ["1"])[0])
             decontam = qs.get("decontaminate", ["true"])[0].lower() == "true"
             recover_holes = qs.get("recover_holes", ["true"])[0].lower() == "true"
@@ -2132,10 +2160,15 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(err_msg)))
                 self.end_headers()
                 self.wfile.write(err_msg)
+        elif parsed.path == "/api/exit":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"shutting down")
+            trigger_shutdown()
         else:
             self.send_response(404)
             self.end_headers()
-
     def log_message(self, format, *args):
         pass
 
@@ -2177,7 +2210,6 @@ def launch_app_window(url):
                 "--no-default-browser-check"
             ]
             proc = subprocess.Popen(cmd)
-            proc.wait()
             return
 
     # Chrome fallback
@@ -2196,23 +2228,27 @@ def launch_app_window(url):
                 "--no-default-browser-check"
             ]
             proc = subprocess.Popen(cmd)
-            proc.wait()
             return
 
     webbrowser.open(url)
 
-def watchdog_monitor(server):
-    # Auto-shutdown server 8s after browser window closes (when pings stop)
-    while True:
-        time.sleep(2)
+shutdown_event = threading.Event()
+
+def trigger_shutdown():
+    def _delay_exit():
+        time.sleep(0.5)
+        shutdown_event.set()
+    threading.Thread(target=_delay_exit, daemon=True).start()
+
+def watchdog_monitor():
+    # Auto-shutdown server only after 60s of complete silence (no pings/requests)
+    while not shutdown_event.is_set():
+        time.sleep(3)
         if has_received_first_request:
             idle_seconds = time.time() - last_activity_time
-            if idle_seconds > 8:
-                try:
-                    server.shutdown()
-                except Exception:
-                    pass
-                sys.exit(0)
+            if idle_seconds > 60:
+                shutdown_event.set()
+                break
 
 if __name__ == "__main__":
     PORT = find_open_port(7860)
@@ -2226,12 +2262,18 @@ if __name__ == "__main__":
     # Wait until server socket is accepting connections
     wait_for_server(PORT, timeout=5.0)
 
-    # Start watchdog to terminate server when window closes
-    watchdog_thread = threading.Thread(target=watchdog_monitor, args=(server,), daemon=True)
+    # Pre-warm default model in background so first paste is instant!
+    threading.Thread(target=lambda: get_session("isnet-general-use"), daemon=True).start()
+
+    # Start watchdog to terminate server only when completely idle for 60s
+    watchdog_thread = threading.Thread(target=watchdog_monitor, daemon=True)
     watchdog_thread.start()
 
     # Launch standalone application window
     launch_app_window(url)
+
+    # Keep server alive until window is closed or 60s silence
+    shutdown_event.wait()
 
     # Clean shutdown
     try:
