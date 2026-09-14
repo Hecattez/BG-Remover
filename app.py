@@ -1891,17 +1891,46 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
-def recover_fine_details(mask_arr, orig_arr):
+def fast_guided_filter(guide, p, r=2, eps=1e-3):
     """
-    Color-Guided Fine Detail Recovery:
-    Neural networks often assign low confidence (alpha 2-20) to thin 1-pixel structures
-    (like audio cords, fine hair, wires, antennae) that blend into the background.
-    We sample the background color from the confirmed background border (mask < 5).
-    For any pixel where the model detected a trace of foreground (mask > 1), if its color
-    strongly contrasts with the background (e.g. dark green cord on pale green background),
-    its alpha is cleanly restored to full opacity. True background pixels remain 0.
+    Fast O(1) Guided Filter (He et al. TPAMI):
+    Refines the alpha mask using the original image luminance as the guide surface.
+    Aligns boundary alpha directly to the photographic sensor's true optical anti-aliasing,
+    eliminating neural network quantization stair-stepping and jagged edges while
+    preserving crisp, silky-smooth object silhouettes.
     """
     import numpy as np
+    import scipy.ndimage as ndi
+
+    size = 2 * r + 1
+    mean_I = ndi.uniform_filter(guide, size=size)
+    mean_p = ndi.uniform_filter(p, size=size)
+    mean_Ip = ndi.uniform_filter(guide * p, size=size)
+    cov_Ip = mean_Ip - mean_I * mean_p
+
+    mean_II = ndi.uniform_filter(guide * guide, size=size)
+    var_I = mean_II - mean_I * mean_I
+
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+
+    mean_a = ndi.uniform_filter(a, size=size)
+    mean_b = ndi.uniform_filter(b, size=size)
+
+    q = mean_a * guide + mean_b
+    return np.clip(q, 0.0, 1.0)
+
+def recover_fine_details(mask_arr, orig_arr):
+    """
+    Selective Fine Detail & Cord Recovery:
+    Only boosts isolated thin structures (like 1-pixel headphone cords, fine wires,
+    hair strands, antennae) that have low model confidence (alpha 2-20).
+    Solid object boundaries (like chairs, clothes, bodies) are strictly protected by
+    identifying the solid core (mask >= 180) and its perimeter zone, completely
+    preserving natural sub-pixel anti-aliased edge ramps without binarizing.
+    """
+    import numpy as np
+    import scipy.ndimage as ndi
 
     h, w = mask_arr.shape
     border = np.zeros((h, w), dtype=bool)
@@ -1918,11 +1947,19 @@ def recover_fine_details(mask_arr, orig_arr):
     bg_color = np.median(bg_pts, axis=0)
     color_dist = np.linalg.norm(orig_arr.astype(np.float32) - bg_color, axis=2)
 
+    # Solid core: pixels with confidence >= 180
+    solid_core = mask_arr >= 180
+    # Any pixel within 4px of a solid core is a solid boundary zone -> DO NOT BINARIZE!
+    solid_boundary_zone = ndi.binary_dilation(solid_core, iterations=4)
+
+    # Only thin/isolated structures outside the solid boundary zone are candidate for cord boost
+    is_thin_structure = (mask_arr > 1) & (~solid_boundary_zone)
+
     contrast_threshold = 38.0
     boost_factor = np.clip((color_dist - contrast_threshold) / 30.0, 0.0, 1.0)
 
     boosted = np.where(
-        (mask_arr > 1) & (color_dist > contrast_threshold),
+        is_thin_structure & (color_dist > contrast_threshold),
         np.maximum(mask_arr.astype(np.float32), 255.0 * boost_factor),
         mask_arr.astype(np.float32)
     )
@@ -2059,26 +2096,26 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                 else:
                     cutout_img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
 
-                # Color-guided fine detail & cord recovery (recovers thin cords, fine wires, and hair)
+                # 1. Selective fine detail & cord recovery (protects solid boundaries, boosts thin cords)
                 r, g, b, a = cutout_img.split()
                 a_arr = np.array(a)
                 a_recovered = recover_fine_details(a_arr, orig_arr)
 
+                # 2. Guided Filter: aligns alpha directly to photographic sensor optical anti-aliasing
+                orig_gray = np.mean(orig_arr.astype(np.float32) / 255.0, axis=2)
+                a_norm = a_recovered.astype(np.float32) / 255.0
+                a_guided = fast_guided_filter(orig_gray, a_norm, r=2, eps=1e-3)
+
+                # 3. Defringe (smooth continuous edge curve without jagged stair-stepping)
                 if trim_px > 0:
-                    a_clean = a_recovered.astype(np.float32) / 255.0
-
-                    # Smoothly contract faint edge bleed without binarizing
-                    cutoff = 0.04 * trim_px
-                    a_clean = np.clip((a_clean - cutoff) / (1.0 - cutoff), 0.0, 1.0)
-                    a_clean = np.power(a_clean, 1.0 + 0.1 * trim_px)
-                    a_img = Image.fromarray((a_clean * 255.0).astype(np.uint8))
-
-                    # Sub-pixel anti-alias feathering to ensure silky-smooth curvature
-                    a_img = a_img.filter(ImageFilter.GaussianBlur(0.3))
-
-                    cutout_img = Image.merge("RGBA", (r, g, b, a_img))
+                    cutoff = 0.02 * trim_px
+                    a_clean = np.clip((a_guided - cutoff) / (1.0 - cutoff), 0.0, 1.0)
+                    a_clean = np.power(a_clean, 1.0 + 0.05 * trim_px)
                 else:
-                    cutout_img = Image.merge("RGBA", (r, g, b, Image.fromarray(a_recovered)))
+                    a_clean = a_guided
+
+                a_final = (a_clean * 255.0).astype(np.uint8)
+                cutout_img = Image.merge("RGBA", (r, g, b, Image.fromarray(a_final)))
                 out_buf = io.BytesIO()
                 cutout_img.save(out_buf, format="PNG")
                 output_bytes = out_buf.getvalue()
