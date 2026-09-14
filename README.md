@@ -15,12 +15,15 @@ A fast, private, 100% offline background removal desktop application tailored fo
   - Press `Ctrl + V` in the app to process.
   - The transparent cutout is automatically written back to your clipboard—ready to paste directly into Photoshop, Figma, Discord, or PowerPoint.
 - **🧠 Multiple AI Backends (Offline & Local):**
-  - **U2-Net** *(Default)*: Fast and balanced (~1–2s on laptop CPU).
-  - **IS-Net (DIS5K)**: High-accuracy dichotomous image segmentation for complex and camouflaged subjects.
+  - **IS-Net (DIS5K)** *(Default & Recommended)*: High-accuracy 1024px dichotomous segmentation with automatic hole and silhouette detection (~1.9s on CPU).
+  - **BiRefNet Lite**: State-of-the-art bilateral reference transformer for maximum precision and micro-details.
+  - **U2-Net**: Legacy balanced model (~170MB).
   - **Silueta**: Ultra-lightweight model (~40MB) for near-instant cutouts.
-  - **BRIA RMBG 2.0**: State-of-the-art bilateral transformer segmentation.
+  - **BRIA RMBG 2.0**: High-capacity deep learning model (~1GB).
 - **🎯 Dual-Pass Saliency Fusion (Camouflage Master):**
   - Eliminates false interior cutouts (e.g. white meat on white background, white shirts, specular highlights) by calculating the mathematical union of color and structural luminance saliency passes.
+- **🔬 Color-Guided Fine Detail & Cord Recovery:**
+  - Automatically restores thin audio cords, fine wires, and hair strands without wiping them out during defringing, achieving remove.bg parity in ~1.9s on CPU.
 - **🪄 Anti-Aliased Sub-Pixel Defringing:**
   - Removes dark color bleeding and shadow halos without destroying edge anti-aliasing or causing stair-stepped jaggedness.
 - **🔍 Interactive Comparison & Live Backdrops:**

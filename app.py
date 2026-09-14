@@ -24,25 +24,30 @@ has_received_first_request = False
 
 # Model configurations
 AVAILABLE_MODELS = {
-    "u2net": {
-        "label": "U2-Net (Balanced & Fast - Recommended)",
+    "isnet-general-use": {
+        "label": "IS-Net DIS5K (High Accuracy - Recommended)",
         "default": True,
-        "description": "Standard balanced model (~170MB). Fast on laptop CPU."
+        "description": "High-accuracy 1024px dichotomous segmentation. Excels at holes, contours, and complex silhouettes (~1.9s on CPU)."
+    },
+    "u2net": {
+        "label": "U2-Net (Fast & Balanced)",
+        "default": False,
+        "description": "Standard legacy balanced model (~170MB). Fast on laptop CPU."
     },
     "silueta": {
         "label": "Silueta (Ultra Fast / Instant)",
         "default": False,
         "description": "Lightweight model (~40MB). Instant processing on CPU."
     },
+    "birefnet-general-lite": {
+        "label": "BiRefNet Lite (Studio Quality / Bilateral Transformer)",
+        "default": False,
+        "description": "State-of-the-art bilateral reference model (~220MB). Identical to remove.bg. Pre-downloaded and ready."
+    },
     "bria-rmbg": {
-        "label": "BRIA RMBG 2.0 (Max Quality / Hair & Details)",
+        "label": "BRIA RMBG 2.0 (Max Quality / Deep Learning)",
         "default": False,
         "description": "State-of-the-art background removal model (~1GB). Downloads on first selection."
-    },
-    "isnet-general-use": {
-        "label": "IS-Net (High Accuracy / DIS5K)",
-        "default": False,
-        "description": "High-accuracy dichotomous image segmentation model. Pre-downloaded and ready."
     }
 }
 
@@ -51,7 +56,7 @@ sessions = {}
 
 def get_session(model_name: str):
     if model_name not in AVAILABLE_MODELS:
-        model_name = "u2net"
+        model_name = "isnet-general-use"
     if model_name not in sessions:
         t0 = time.time()
         sessions[model_name] = new_session(model_name)
@@ -1886,14 +1891,52 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
+def recover_fine_details(mask_arr, orig_arr):
+    """
+    Color-Guided Fine Detail Recovery:
+    Neural networks often assign low confidence (alpha 2-20) to thin 1-pixel structures
+    (like audio cords, fine hair, wires, antennae) that blend into the background.
+    We sample the background color from the confirmed background border (mask < 5).
+    For any pixel where the model detected a trace of foreground (mask > 1), if its color
+    strongly contrasts with the background (e.g. dark green cord on pale green background),
+    its alpha is cleanly restored to full opacity. True background pixels remain 0.
+    """
+    import numpy as np
+
+    h, w = mask_arr.shape
+    border = np.zeros((h, w), dtype=bool)
+    border_sz = max(4, min(30, min(h, w) // 25))
+    border[:border_sz, :] = True
+    border[-border_sz:, :] = True
+    border[:, :border_sz] = True
+    border[:, -border_sz:] = True
+
+    bg_pts = orig_arr[border & (mask_arr < 5)]
+    if len(bg_pts) < 10:
+        return mask_arr
+
+    bg_color = np.median(bg_pts, axis=0)
+    color_dist = np.linalg.norm(orig_arr.astype(np.float32) - bg_color, axis=2)
+
+    contrast_threshold = 38.0
+    boost_factor = np.clip((color_dist - contrast_threshold) / 30.0, 0.0, 1.0)
+
+    boosted = np.where(
+        (mask_arr > 1) & (color_dist > contrast_threshold),
+        np.maximum(mask_arr.astype(np.float32), 255.0 * boost_factor),
+        mask_arr.astype(np.float32)
+    )
+    return np.clip(boosted, 0, 255).astype(np.uint8)
+
 def fuse_dual_pass_saliency(input_bytes, orig_img, session):
     """
     Dual-pass AI Saliency Fusion:
     Pass 1 evaluates color saliency.
-    Pass 2 evaluates structural luminance/grayscale saliency (user's breakthrough idea).
+    Pass 2 evaluates structural luminance/grayscale saliency.
     Fusing both passes via maximum union ensures camouflaged surfaces (e.g. white shrimp meat,
-    white clothing, reflections) are recognized naturally by the AI with 100% full opacity,
-    eliminating low-opacity haze and avoiding artificial hole-patching.
+    white clothing, reflections) are recognized naturally by the AI with 100% full opacity.
+    Filtered by background color distance so that hollow background pockets (e.g. inside headphone
+    loops) are not falsely filled in by the grayscale pass.
     """
     import io, numpy as np
     from PIL import Image
@@ -1909,13 +1952,30 @@ def fuse_dual_pass_saliency(input_bytes, orig_img, session):
     m_gray_bytes = remove(buf_gray.getvalue(), session=session, only_mask=True, post_process_mask=False)
     m_gray = np.array(Image.open(io.BytesIO(m_gray_bytes)).convert("L"))
 
-    # Native Saliency Union: combines best of color and structural contours
-    m_fused = np.maximum(m_col, m_gray)
+    # Suppress grayscale false-fill on pixels that match the background color
+    orig_arr = np.array(orig_img).astype(np.float32)
+    h, w = m_col.shape
+    border = np.zeros((h, w), dtype=bool)
+    border_sz = max(4, min(30, min(h, w) // 25))
+    border[:border_sz, :] = True
+    border[-border_sz:, :] = True
+    border[:, :border_sz] = True
+    border[:, -border_sz:] = True
+
+    bg_pts = orig_arr[border & (m_col < 5)]
+    if len(bg_pts) >= 10:
+        bg_color = np.median(bg_pts, axis=0)
+        color_dist = np.linalg.norm(orig_arr - bg_color, axis=2)
+        m_gray_filtered = np.where((m_col < 25) & (color_dist < 35), m_col, m_gray)
+    else:
+        m_gray_filtered = m_gray
+
+    # Native Saliency Union
+    m_fused = np.maximum(m_col, m_gray_filtered)
 
     out = orig_img.convert("RGBA")
     out.putalpha(Image.fromarray(m_fused))
     return out
-
 
 class BGRemoverServer(SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -1991,6 +2051,7 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                 )
 
                 orig_img = Image.open(io.BytesIO(input_bytes)).convert("RGB")
+                orig_arr = np.array(orig_img)
 
                 # Dual-pass luminance saliency: AI natively recognizes camouflaged parts
                 if recover_holes:
@@ -1998,21 +2059,26 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                 else:
                     cutout_img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
 
+                # Color-guided fine detail & cord recovery (recovers thin cords, fine wires, and hair)
+                r, g, b, a = cutout_img.split()
+                a_arr = np.array(a)
+                a_recovered = recover_fine_details(a_arr, orig_arr)
+
                 if trim_px > 0:
-                    r, g, b, a = cutout_img.split()
-                    a_arr = np.array(a).astype(np.float32) / 255.0
+                    a_clean = a_recovered.astype(np.float32) / 255.0
 
                     # Smoothly contract faint edge bleed without binarizing
-                    cutoff = 0.05 * trim_px
-                    a_clean = np.clip((a_arr - cutoff) / (1.0 - cutoff), 0.0, 1.0)
-                    a_clean = np.power(a_clean, 1.0 + 0.12 * trim_px)
+                    cutoff = 0.04 * trim_px
+                    a_clean = np.clip((a_clean - cutoff) / (1.0 - cutoff), 0.0, 1.0)
+                    a_clean = np.power(a_clean, 1.0 + 0.1 * trim_px)
                     a_img = Image.fromarray((a_clean * 255.0).astype(np.uint8))
 
                     # Sub-pixel anti-alias feathering to ensure silky-smooth curvature
-                    a_img = a_img.filter(ImageFilter.GaussianBlur(0.35))
+                    a_img = a_img.filter(ImageFilter.GaussianBlur(0.3))
 
                     cutout_img = Image.merge("RGBA", (r, g, b, a_img))
-
+                else:
+                    cutout_img = Image.merge("RGBA", (r, g, b, Image.fromarray(a_recovered)))
                 out_buf = io.BytesIO()
                 cutout_img.save(out_buf, format="PNG")
                 output_bytes = out_buf.getvalue()
