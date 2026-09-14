@@ -27,10 +27,11 @@ A fast, private, 100% offline background removal desktop application tailored fo
   - Split Before/After comparison slider.
   - Side-by-Side and Cutout Only view modes.
   - Live preview swatches: Dark Checkerboard, Light Checkerboard, Solid Black, Solid White, and Green Screen.
-- **🖌️ Interactive Refine Brush (Erase & Restore Touch-Up):**
-  - **Erase Mode:** Instantly erase stray background details, shadows, or artifacts.
-  - **Restore Mode:** Paint over clipped sections to recover details from the original image.
-  - Adjustable brush radius with on-screen visual cursor, softness feathering slider, zoom & pan controls, and instant GPU-accelerated undo/redo (`Ctrl + Z` / `Ctrl + Y`).
+- **🖌️ Interactive Refine Brush & Magic Tap (remove.bg-style Smart AI):**
+  - **✨ Smart AI Mode (Auto-Snap):** Roughly mark or swipe over an area; the algorithm automatically detects subject boundaries and removes/restores the target region while protecting the subject's edges.
+  - **🪄 Magic Tap (One-Click Hole Remover):** Click once inside any enclosed hole or background pocket (e.g. inside headphone loops, mug handles, arms/legs) to erase the entire pocket instantly.
+  - **🖌️ Manual Mode:** Direct pixel eraser/restore for exact pixel-by-pixel touch-ups.
+  - **Adjustable Controls:** Tolerance slider for gradient/shadow expansion, brush radius slider, softness feathering, zoom & pan controls, and instant GPU undo/redo (`Ctrl + Z` / `Ctrl + Y`).
 - **🖥️ Standalone Desktop Window:**
   - Runs in a clean, isolated application window with zero terminal windows cluttering `Alt + Tab`.
   - Automatic watchdog keep-alive: cleanly exits when the window closes to free system resources.
@@ -72,6 +73,8 @@ A fast, private, 100% offline background removal desktop application tailored fo
 | **`Ctrl + R`** | Reload application |
 | **`E` or `1`** | Switch to Erase Brush *(when in Refine Brush mode)* |
 | **`R` or `2`** | Switch to Restore Brush *(when in Refine Brush mode)* |
+| **`M` or `3`** | Switch to Magic Tap *(1-click hole/pocket eraser)* |
+| **`S`** | Toggle Smart AI mode vs Manual pixel mode |
 | **`[` / `]`** | Decrease / Increase brush size |
 | **`Ctrl + Z` / `Ctrl + Y`** | Undo / Redo brush strokes |
 | **`Space + Drag`** | Pan image canvas when zoomed in |

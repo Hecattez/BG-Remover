@@ -366,6 +366,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     box-shadow: 0 1px 6px rgba(5, 150, 105, 0.4);
   }
 
+  .brush-tool-btn.active-smart {
+    background: #2563eb !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 6px rgba(37, 99, 235, 0.4);
+  }
+
+  .brush-tool-btn.active-magic-tap {
+    background: #8b5cf6 !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 6px rgba(139, 92, 246, 0.4);
+  }
+
   .brush-param-group {
     display: flex;
     align-items: center;
@@ -441,6 +453,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     border: 2px solid #10b981;
     background: rgba(16, 185, 129, 0.18);
     box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+  }
+
+  .brush-cursor.mode-magic-tap {
+    border: 2px solid #a855f7;
+    background: rgba(168, 85, 247, 0.25);
+    box-shadow: 0 0 8px rgba(168, 85, 247, 0.6);
   }
 
   .bg-swatches {
@@ -717,7 +735,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <option value="2">Deep Defringe (Strong Shadows)</option>
         <option value="0">Natural (Raw)</option>
       </select>
-    <label class="auto-copy-toggle" title="Automatically repair interior holes carved mistakenly (e.g. white shrimp meat, specular reflections)">
+    <label class="auto-copy-toggle" title="Repairs false interior holes on solid subjects (uncheck for hollow objects like headphones or mug handles)">
       <input type="checkbox" id="recoverHolesCheck" checked>
       <span>Solid Subject</span>
     </label>
@@ -772,20 +790,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="brush-toolbar" id="brushToolbar">
       <div class="brush-controls-left">
         <div class="brush-param-group">
-          <span>Tool:</span>
+          <span>Mode:</span>
           <div class="brush-btn-group">
-            <button id="toolEraseBtn" class="brush-tool-btn active-erase" onclick="setBrushTool('erase')" title="Erase leftover background (E or 1)">⌫ Erase</button>
-            <button id="toolRestoreBtn" class="brush-tool-btn" onclick="setBrushTool('restore')" title="Restore clipped parts from original (R or 2)">⎗ Restore</button>
+            <button id="modeSmartBtn" class="brush-tool-btn active-smart" onclick="setBrushSnapMode('smart')" title="Smart AI Edge-Snapping (Auto-snaps to subject boundaries like remove.bg)">✨ Smart AI</button>
+            <button id="modeManualBtn" class="brush-tool-btn" onclick="setBrushSnapMode('manual')" title="Manual pixel painting (exact pixel-by-pixel control)">🖌️ Manual</button>
           </div>
         </div>
 
         <div class="brush-param-group">
+          <span>Tool:</span>
+          <div class="brush-btn-group">
+            <button id="toolEraseBtn" class="brush-tool-btn active-erase" onclick="setBrushTool('erase')" title="Erase background with edge snapping (E or 1)">⌫ Erase</button>
+            <button id="toolRestoreBtn" class="brush-tool-btn" onclick="setBrushTool('restore')" title="Restore subject with edge snapping (R or 2)">⎗ Restore</button>
+            <button id="toolMagicTapBtn" class="brush-tool-btn" onclick="setBrushTool('magic-tap')" title="Magic Tap: Click any enclosed hole or background pocket to auto-erase it in 1 click (M or 3)">🪄 Magic Tap</button>
+          </div>
+        </div>
+
+        <div class="brush-param-group" id="brushSizeGroup">
           <label for="brushSizeInput">Size:</label>
           <input type="range" id="brushSizeInput" min="4" max="150" value="30" oninput="setBrushSize(this.value)">
           <span id="brushSizeVal" class="brush-badge">30px</span>
         </div>
 
-        <div class="brush-param-group">
+        <div class="brush-param-group" id="brushTolGroup">
+          <label for="brushTolInput" title="Controls how far smart erase expands over gradients and shadows (higher = covers more shadow)">Tolerance:</label>
+          <input type="range" id="brushTolInput" min="10" max="85" value="35" oninput="setBrushTolerance(this.value)">
+          <span id="brushTolVal" class="brush-badge">35%</span>
+        </div>
+
+        <div class="brush-param-group" id="brushSoftGroup">
           <label for="brushSoftInput">Softness:</label>
           <input type="range" id="brushSoftInput" min="0" max="100" value="25" oninput="setBrushSoftness(this.value)">
           <span id="brushSoftVal" class="brush-badge">25%</span>
@@ -896,8 +929,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   const brushCursor = document.getElementById('brushCursor');
 
   // Brush tool state
-  let brushTool = 'erase';
+  let brushSnapMode = 'smart'; // 'smart' | 'manual'
+  let brushTool = 'erase'; // 'erase' | 'restore' | 'magic-tap'
   let brushRadius = 15;
+  let brushTolerance = 35;
   let brushSoftness = 25;
   let brushZoom = 1.0;
   let brushPanX = 0;
@@ -913,7 +948,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   let redoStack = [];
   let initialAIBitmap = null;
   let brushInitialized = false;
-
+  let activeCutoutImgData = null;
+  let activeOrigImgData = null;
   const origCanvas = document.createElement('canvas');
   const origCtx = origCanvas.getContext('2d');
   const scratchCanvas = document.createElement('canvas');
@@ -1181,17 +1217,57 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     brushTool = tool;
     const eraseBtn = document.getElementById('toolEraseBtn');
     const restoreBtn = document.getElementById('toolRestoreBtn');
+    const magicTapBtn = document.getElementById('toolMagicTapBtn');
+    const sizeGroup = document.getElementById('brushSizeGroup');
+
+    if (eraseBtn) eraseBtn.classList.remove('active-erase');
+    if (restoreBtn) restoreBtn.classList.remove('active-restore');
+    if (magicTapBtn) magicTapBtn.classList.remove('active-magic-tap');
+
+    brushCursor.classList.remove('mode-erase', 'mode-restore', 'mode-magic-tap');
+
     if (tool === 'erase') {
-      eraseBtn.classList.add('active-erase');
-      restoreBtn.classList.remove('active-restore');
-      brushCursor.classList.remove('mode-restore');
+      if (eraseBtn) eraseBtn.classList.add('active-erase');
       brushCursor.classList.add('mode-erase');
-    } else {
-      restoreBtn.classList.add('active-restore');
-      eraseBtn.classList.remove('active-erase');
-      brushCursor.classList.remove('mode-erase');
+      if (sizeGroup) sizeGroup.style.display = 'flex';
+      statusText.innerHTML = `<span class="toast">⌫ Erase tool active (edge-snapping in Smart mode)</span>`;
+    } else if (tool === 'restore') {
+      if (restoreBtn) restoreBtn.classList.add('active-restore');
       brushCursor.classList.add('mode-restore');
+      if (sizeGroup) sizeGroup.style.display = 'flex';
+      statusText.innerHTML = `<span class="toast">⎗ Restore tool active (edge-snapping in Smart mode)</span>`;
+    } else if (tool === 'magic-tap') {
+      if (magicTapBtn) magicTapBtn.classList.add('active-magic-tap');
+      brushCursor.classList.add('mode-magic-tap');
+      if (sizeGroup) sizeGroup.style.display = 'none';
+      statusText.innerHTML = `<span class="toast">🪄 Magic Tap: Click anywhere inside an enclosed hole or background pocket to auto-erase it instantly!</span>`;
     }
+  }
+
+  function setBrushSnapMode(mode) {
+    brushSnapMode = mode;
+    const smartBtn = document.getElementById('modeSmartBtn');
+    const manualBtn = document.getElementById('modeManualBtn');
+    const tolGroup = document.getElementById('brushTolGroup');
+    if (mode === 'smart') {
+      if (smartBtn) smartBtn.classList.add('active-smart');
+      if (manualBtn) manualBtn.classList.remove('active-smart');
+      if (tolGroup) tolGroup.style.display = 'flex';
+      statusText.innerHTML = `<span class="toast">✨ Smart AI mode active: strokes automatically snap to object boundaries</span>`;
+    } else {
+      if (manualBtn) manualBtn.classList.add('active-smart');
+      if (smartBtn) smartBtn.classList.remove('active-smart');
+      if (tolGroup) tolGroup.style.display = 'none';
+      statusText.innerHTML = `<span class="toast">🖌️ Manual mode active: exact pixel painting</span>`;
+    }
+  }
+
+  function setBrushTolerance(val) {
+    brushTolerance = Math.max(10, Math.min(85, parseInt(val, 10)));
+    const badge = document.getElementById('brushTolVal');
+    const slider = document.getElementById('brushTolInput');
+    if (badge) badge.textContent = `${brushTolerance}%`;
+    if (slider && parseInt(slider.value, 10) !== brushTolerance) slider.value = brushTolerance;
   }
 
   function setBrushSize(val) {
@@ -1467,6 +1543,185 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
   }
 
+  // Magic Tap: One-Click Bounded Region Removal
+  function magicTapErase(startX, startY, tolPct) {
+    const w = brushCanvas.width;
+    const h = brushCanvas.height;
+    startX = Math.max(0, Math.min(w - 1, Math.round(startX)));
+    startY = Math.max(0, Math.min(h - 1, Math.round(startY)));
+
+    const cutoutImgData = brushCtx.getImageData(0, 0, w, h);
+    const origImgData = origCtx.getImageData(0, 0, w, h);
+    const orig = origImgData.data;
+    const cutout = cutoutImgData.data;
+
+    const colorTol = (tolPct / 100) * 125;
+    const colorTolSq = colorTol * colorTol;
+    const edgeBarrier = Math.max(10, (100 - tolPct) * 0.35);
+
+    const sIdx = (startY * w + startX) * 4;
+    const sR = orig[sIdx], sG = orig[sIdx + 1], sB = orig[sIdx + 2];
+
+    const visited = new Uint8Array(w * h);
+    const queue = new Int32Array(w * h);
+    let head = 0, tail = 0;
+
+    const startPos = startY * w + startX;
+    queue[tail++] = startPos;
+    visited[startPos] = 1;
+
+    let erased = 0;
+    let minX = startX, maxX = startX, minY = startY, maxY = startY;
+
+    while (head < tail) {
+      const curr = queue[head++];
+      const cx = curr % w;
+      const cy = (curr / w) | 0;
+      const cIdx = curr * 4;
+
+      cutout[cIdx + 3] = 0;
+      erased++;
+
+      if (cx < minX) minX = cx;
+      if (cx > maxX) maxX = cx;
+      if (cy < minY) minY = cy;
+      if (cy > maxY) maxY = cy;
+
+      const cR = orig[cIdx], cG = orig[cIdx + 1], cB = orig[cIdx + 2];
+
+      const neighbors = [
+        cx > 0 ? curr - 1 : -1,
+        cx < w - 1 ? curr + 1 : -1,
+        cy > 0 ? curr - w : -1,
+        cy < h - 1 ? curr + w : -1
+      ];
+
+      for (let i = 0; i < 4; i++) {
+        const n = neighbors[i];
+        if (n >= 0 && !visited[n]) {
+          const nIdx = n * 4;
+          const nR = orig[nIdx], nG = orig[nIdx + 1], nB = orig[nIdx + 2];
+
+          // Edge contrast step
+          const sdr = nR - cR, sdg = nG - cG, sdb = nB - cB;
+          if (Math.hypot(sdr, sdg, sdb) > edgeBarrier) continue;
+
+          // Color difference from clicked seed
+          const gdr = nR - sR, gdg = nG - sG, gdb = nB - sB;
+          if (gdr * gdr + gdg * gdg + gdb * gdb > colorTolSq) continue;
+
+          visited[n] = 1;
+          queue[tail++] = n;
+        }
+      }
+    }
+
+    if (erased > 0) {
+      brushCtx.putImageData(cutoutImgData, 0, 0, minX, minY, maxX - minX + 1, maxY - minY + 1);
+    }
+    return erased;
+  }
+
+  // Smart AI Edge-Snapping Stamp (Drag)
+  function smartBrushStamp(centerX, centerY, radius, tolPct, mode) {
+    if (!activeCutoutImgData || !activeOrigImgData) {
+      activeCutoutImgData = brushCtx.getImageData(0, 0, brushCanvas.width, brushCanvas.height);
+      activeOrigImgData = origCtx.getImageData(0, 0, brushCanvas.width, brushCanvas.height);
+    }
+    const w = brushCanvas.width;
+    const h = brushCanvas.height;
+    const orig = activeOrigImgData.data;
+    const cutout = activeCutoutImgData.data;
+
+    centerX = Math.max(0, Math.min(w - 1, Math.round(centerX)));
+    centerY = Math.max(0, Math.min(h - 1, Math.round(centerY)));
+
+    const colorTol = (tolPct / 100) * 115;
+    const colorTolSq = colorTol * colorTol;
+    const edgeBarrier = Math.max(10, (100 - tolPct) * 0.35);
+
+    const sIdx = (centerY * w + centerX) * 4;
+    const sR = orig[sIdx], sG = orig[sIdx + 1], sB = orig[sIdx + 2];
+
+    const rSq = radius * radius;
+    const minX = Math.max(0, centerX - radius);
+    const maxX = Math.min(w - 1, centerX + radius);
+    const minY = Math.max(0, centerY - radius);
+    const maxY = Math.min(h - 1, centerY + radius);
+
+    const localW = maxX - minX + 1;
+    const localH = maxY - minY + 1;
+    const visited = new Uint8Array(localW * localH);
+    const queue = new Int32Array(localW * localH);
+    let head = 0, tail = 0;
+
+    const startLocal = (centerY - minY) * localW + (centerX - minX);
+    queue[tail++] = startLocal;
+    visited[startLocal] = 1;
+
+    let changed = 0;
+
+    while (head < tail) {
+      const curr = queue[head++];
+      const lx = curr % localW;
+      const ly = (curr / localW) | 0;
+      const gx = minX + lx;
+      const gy = minY + ly;
+
+      const gIdx = (gy * w + gx) * 4;
+
+      if (mode === 'erase') {
+        cutout[gIdx + 3] = 0;
+      } else {
+        cutout[gIdx] = orig[gIdx];
+        cutout[gIdx + 1] = orig[gIdx + 1];
+        cutout[gIdx + 2] = orig[gIdx + 2];
+        cutout[gIdx + 3] = 255;
+      }
+      changed++;
+
+      const cR = orig[gIdx], cG = orig[gIdx + 1], cB = orig[gIdx + 2];
+
+      const neighbors = [
+        lx > 0 ? curr - 1 : -1,
+        lx < localW - 1 ? curr + 1 : -1,
+        ly > 0 ? curr - localW : -1,
+        ly < (maxY - minY) ? curr + localW : -1
+      ];
+
+      for (let i = 0; i < 4; i++) {
+        const n = neighbors[i];
+        if (n >= 0 && !visited[n]) {
+          const nlx = n % localW;
+          const nly = (n / localW) | 0;
+          const ngx = minX + nlx;
+          const ngy = minY + nly;
+
+          const dx = ngx - centerX, dy = ngy - centerY;
+          if (dx * dx + dy * dy > rSq) continue;
+
+          const nIdx = (ngy * w + ngx) * 4;
+          const nR = orig[nIdx], nG = orig[nIdx + 1], nB = orig[nIdx + 2];
+
+          // Edge barrier: difference across step
+          const sdr = nR - cR, sdg = nG - cG, sdb = nB - cB;
+          if (Math.hypot(sdr, sdg, sdb) > edgeBarrier) continue;
+
+          // Global seed tolerance
+          const gdr = nR - sR, gdg = nG - sG, gdb = nB - sB;
+          if (gdr * gdr + gdg * gdg + gdb * gdb > colorTolSq) continue;
+
+          visited[n] = 1;
+          queue[tail++] = n;
+        }
+      }
+    }
+
+    if (changed > 0) {
+      brushCtx.putImageData(activeCutoutImgData, 0, 0, minX, minY, localW, localH);
+    }
+  }
+
   // Brush pointer & mouse interactions
   brushStage.addEventListener('pointermove', (e) => {
     if (currentViewMode !== 'brush') return;
@@ -1479,7 +1734,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     const rect = brushCanvas.getBoundingClientRect();
     const scale = brushCanvas.width > 0 ? (rect.width / brushCanvas.width) : 1;
-    const diam = Math.max(6, Math.round(brushRadius * 2 * scale));
+    const diam = brushTool === 'magic-tap' ? 24 : Math.max(6, Math.round(brushRadius * 2 * scale));
     brushCursor.style.width = diam + 'px';
     brushCursor.style.height = diam + 'px';
     brushCursor.style.display = 'block';
@@ -1491,7 +1746,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       updateZoomBadge();
     } else if (isPainting) {
       const coords = getCanvasCoords(e.clientX, e.clientY);
-      drawBrushSegment(lastX, lastY, coords.x, coords.y);
+      if (brushSnapMode === 'smart') {
+        const dist = Math.hypot(coords.x - lastX, coords.y - lastY);
+        const step = Math.max(2, brushRadius * 0.35);
+        const steps = Math.ceil(dist / step);
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const ix = Math.round(lastX + (coords.x - lastX) * t);
+          const iy = Math.round(lastY + (coords.y - lastY) * t);
+          smartBrushStamp(ix, iy, brushRadius, brushTolerance, brushTool);
+        }
+      } else {
+        drawBrushSegment(lastX, lastY, coords.x, coords.y);
+      }
       lastX = coords.x;
       lastY = coords.y;
     }
@@ -1512,10 +1779,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     if (e.button === 0) {
+      const coords = getCanvasCoords(e.clientX, e.clientY);
+      if (!coords.inside) return;
+
+      if (brushTool === 'magic-tap') {
+        await pushBrushHistory();
+        const erased = magicTapErase(coords.x, coords.y, brushTolerance);
+        commitBrushToBlobs();
+        statusText.innerHTML = `<span class="toast">🪄 Magic Tap removed background pocket (${erased.toLocaleString()} px)!</span>`;
+        return;
+      }
+
       await pushBrushHistory();
       isPainting = true;
-      const coords = getCanvasCoords(e.clientX, e.clientY);
-      drawBrushSegment(coords.x, coords.y, coords.x, coords.y);
+
+      if (brushSnapMode === 'smart') {
+        activeCutoutImgData = brushCtx.getImageData(0, 0, brushCanvas.width, brushCanvas.height);
+        activeOrigImgData = origCtx.getImageData(0, 0, brushCanvas.width, brushCanvas.height);
+        smartBrushStamp(coords.x, coords.y, brushRadius, brushTolerance, brushTool);
+      } else {
+        drawBrushSegment(coords.x, coords.y, coords.x, coords.y);
+      }
       lastX = coords.x;
       lastY = coords.y;
     }
@@ -1524,6 +1808,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   window.addEventListener('pointerup', () => {
     if (isPainting) {
       isPainting = false;
+      activeCutoutImgData = null;
+      activeOrigImgData = null;
       commitBrushToBlobs();
     }
     if (isPanning) {
@@ -1535,6 +1821,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   window.addEventListener('pointercancel', () => {
     if (isPainting) {
       isPainting = false;
+      activeCutoutImgData = null;
+      activeOrigImgData = null;
       commitBrushToBlobs();
     }
     isPanning = false;
@@ -1575,6 +1863,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         setBrushTool('erase');
       } else if (e.key.toLowerCase() === 'r' || e.key === '2') {
         setBrushTool('restore');
+      } else if (e.key.toLowerCase() === 'm' || e.key === '3') {
+        setBrushTool('magic-tap');
+      } else if (e.key.toLowerCase() === 's') {
+        setBrushSnapMode(brushSnapMode === 'smart' ? 'manual' : 'smart');
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) redoBrush(); else undoBrush();
