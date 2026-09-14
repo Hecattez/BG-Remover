@@ -770,8 +770,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </select>
     </div>
 
-    <label class="auto-copy-toggle" title="Repairs false interior holes on solid subjects (uncheck for hollow objects like headphones or mug handles)">
-      <input type="checkbox" id="recoverHolesCheck" checked>
+    <label class="auto-copy-toggle" title="Only enable for solid camouflaged items (e.g. white shrimp on white plate). Leave off for cords, loops, and hollow objects.">
+      <input type="checkbox" id="recoverHolesCheck">
       <span>Solid Subject</span>
     </label>
 
@@ -1937,6 +1937,83 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
+def suppress_background_webbing(alpha_arr, orig_arr):
+    """
+    Background Cavity & Webbing Suppression:
+    Detects background pockets showing through thin structures (e.g. sky between parachute
+    cords, background between bicycle spokes or chair slats). Samples the background color
+    from confirmed border background pixels. If a pixel lies outside the solid core
+    (dilated by 3px) and closely matches the background color (Delta E < 26), it is
+    suppressed to transparent.
+    """
+    import numpy as np
+    import scipy.ndimage as ndi
+
+    h, w = alpha_arr.shape
+    border = np.zeros((h, w), dtype=bool)
+    border_sz = max(4, min(30, min(h, w) // 25))
+    border[:border_sz, :] = True
+    border[-border_sz:, :] = True
+    border[:, :border_sz] = True
+    border[:, -border_sz:] = True
+
+    bg_pts = orig_arr[border & (alpha_arr < 5)]
+    if len(bg_pts) < 10:
+        bg_pts = orig_arr[:15, :15].reshape(-1, 3)
+
+    bg_color = np.median(bg_pts, axis=0)
+    color_dist = np.linalg.norm(orig_arr.astype(np.float32) - bg_color, axis=2)
+
+    # Solid core: confidence >= 180 dilated by 3px is protected
+    solid_core = alpha_arr >= 180
+    solid_zone = ndi.binary_dilation(solid_core, iterations=3)
+
+    is_webbing = (~solid_zone) & (color_dist < 26.0) & (alpha_arr > 0)
+    return np.where(is_webbing, 0, alpha_arr).astype(np.uint8)
+
+def clean_orphan_islands_distance(alpha_arr, max_distance=30, min_size_ratio=0.03):
+    """
+    Spatial Distance-Aware Orphan Island Pruning:
+    Detects and removes small disconnected background noise artifacts (such as floating
+    dust specks, stray background islands, and border noise strips) that are far from the
+    primary salient subject. Large independent subjects (>= 3% of largest, e.g. multiple
+    people/items) and nearby detached details (<= 30px from subject, e.g. earrings, straps)
+    are safely preserved.
+    """
+    import numpy as np
+    import scipy.ndimage as ndi
+
+    mask_binary = alpha_arr > 10
+    labeled, num = ndi.label(mask_binary)
+    if num <= 1:
+        return alpha_arr
+
+    sizes = ndi.sum(mask_binary, labeled, range(1, num + 1))
+    max_label = np.argmax(sizes) + 1
+    max_size = sizes[max_label - 1]
+
+    main_subject = (labeled == max_label)
+    dist_from_main = ndi.distance_transform_edt(~main_subject)
+
+    keep_labels = [max_label]
+    for i, s in enumerate(sizes):
+        label_id = i + 1
+        if label_id == max_label:
+            continue
+        
+        # Keep large components (e.g. second person or large object in frame)
+        if s >= max_size * min_size_ratio:
+            keep_labels.append(label_id)
+            continue
+
+        # For small components, check distance to main subject
+        comp_mask = (labeled == label_id)
+        min_dist_to_main = dist_from_main[comp_mask].min()
+        if min_dist_to_main <= max_distance:
+            keep_labels.append(label_id)
+
+    valid_mask = np.isin(labeled, keep_labels)
+    return np.where(valid_mask, alpha_arr, 0).astype(np.uint8)
 def fast_guided_filter(guide, p, r=2, eps=1e-3):
     """
     Fast O(1) Guided Filter (He et al. TPAMI):
@@ -2148,17 +2225,23 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                 else:
                     cutout_img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
 
-                # 1. Selective fine detail & cord recovery (protects solid boundaries, boosts thin cords)
+                # 1. Background cavity / webbing suppression (un-webs background between thin cords and spokes)
                 r, g, b, a = cutout_img.split()
                 a_arr = np.array(a)
-                a_recovered = recover_fine_details(a_arr, orig_arr)
+                a_unwebbed = suppress_background_webbing(a_arr, orig_arr)
 
-                # 2. Guided Filter: aligns alpha directly to photographic sensor optical anti-aliasing
+                # 2. Selective fine detail & cord recovery (protects solid boundaries, boosts thin connected cords)
+                a_recovered = recover_fine_details(a_unwebbed, orig_arr)
+
+                # 3. Distance-based orphan island suppression (removes disconnected border strips and floating specks)
+                a_pruned = clean_orphan_islands_distance(a_recovered)
+
+                # 4. Guided Filter: aligns alpha directly to photographic sensor optical anti-aliasing
                 orig_gray = np.mean(orig_arr.astype(np.float32) / 255.0, axis=2)
-                a_norm = a_recovered.astype(np.float32) / 255.0
+                a_norm = a_pruned.astype(np.float32) / 255.0
                 a_guided = fast_guided_filter(orig_gray, a_norm, r=2, eps=1e-3)
 
-                # 3. Defringe (smooth continuous edge curve without jagged stair-stepping)
+                # 5. Defringe (smooth continuous edge curve without jagged stair-stepping)
                 if trim_px > 0:
                     cutoff = 0.02 * trim_px
                     a_clean = np.clip((a_guided - cutoff) / (1.0 - cutoff), 0.0, 1.0)
@@ -2167,7 +2250,21 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                     a_clean = a_guided
 
                 a_final = (a_clean * 255.0).astype(np.uint8)
-                cutout_img = Image.merge("RGBA", (r, g, b, Image.fromarray(a_final)))
+
+                # 6. Premultiply: zero out RGB where alpha is 0 to prevent raw background pixels from leaking
+                r_arr = np.where(a_final > 0, np.array(r), 0)
+                g_arr = np.where(a_final > 0, np.array(g), 0)
+                b_arr = np.where(a_final > 0, np.array(b), 0)
+
+                cutout_img = Image.merge(
+                    "RGBA",
+                    (
+                        Image.fromarray(r_arr.astype(np.uint8)),
+                        Image.fromarray(g_arr.astype(np.uint8)),
+                        Image.fromarray(b_arr.astype(np.uint8)),
+                        Image.fromarray(a_final)
+                    )
+                )
                 out_buf = io.BytesIO()
                 cutout_img.save(out_buf, format="PNG")
                 output_bytes = out_buf.getvalue()
