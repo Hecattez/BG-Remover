@@ -4,95 +4,117 @@
 - **Project:** Local AI Background Remover (Zero-download clipboard-in, clipboard-out workflow).
 - **Local Path:** `D:\BG-Remover`
 - **GitHub Repo:** `https://github.com/Hecattez/BG-Remover` (`git@github.com:Hecattez/BG-Remover.git`)
-- **Main Branch:** `main` (clean initial commit pushed; `.gitignore` ignores `profile/`, `__pycache__`, logs).
+- **Main Branch:** `main`
 - **User:** `Hecattez` (`frgottenacc@gmail.com`)
-- **SSH Key:** Configured in `C:\Users\Windows\.ssh\id_ed25519` and linked to GitHub.
+- **SSH Key:** Configured in `C:\Users\Windows\.ssh\id_ed25519` and verified with GitHub.
 
 ---
 
-## 2. Environment & Runtime
-- **Python:** Python 3.11 (`C:\Users\Windows\AppData\Local\Programs\Python\Python311\python.exe` and `pythonw.exe`).
-  *(Note: Avoid default Python 3.14 on this machine due to wheel compatibility).*
-- **Key Libraries:** `rembg` (v2.0.84), `onnxruntime-directml` (v1.24.4 with DirectX 12 Intel UHD 620 GPU acceleration), `Pillow`, `scipy`, `numpy`, `pymatting`.
-  - `u2net.onnx` (~176MB, legacy balanced model)
-  - `silueta.onnx` (~44MB, ultra-fast model)
-  - `birefnet-general-lite.onnx` (~220MB, SOTA bilateral transformer model)
-  - `bria-rmbg` (available in dropdown for on-demand download)
+## 2. Workstation & Runtime Specifications
+- **Operating System:** Windows 10 Pro (x64, Build 19045)
+- **CPU:** Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz (4 Cores, 8 Threads)
+- **GPU:** Intel(R) UHD Graphics 620 (DirectX 12 feature level 12_1)
+- **RAM:** 8 GB
+- **Python Environment:** Python 3.11 (`C:\Users\Windows\AppData\Local\Programs\Python\Python311\python.exe` and `pythonw.exe`).
+  *(Critical: Avoid default Python 3.14 on this machine due to ONNX/scipy C-extension binary wheel incompatibility).*
+- **Key Installed Dependencies:**
+  - `onnxruntime-directml==1.24.4` (Hardware-accelerates neural inference on Intel UHD 620 via Microsoft DirectX 12 DML; zero background/idle consumption).
+  - `rembg==2.0.84`
+  - `Pillow>=10.0.0`
+  - `scipy>=1.12.0`
+  - `numpy>=1.26.0`
+  - `pymatting==1.1.16` (Provides multi-level Laplacian foreground decontamination and Levin closed-form alpha matting).
+- **Local Model Weights (`C:\Users\Windows\.rembg\models\`):**
+  - `isnet-general-use\isnet-general-use.onnx` (~179MB, native $1024\text{px}$ DIS5K dichotomous segmentation — **Default Auto-Pilot Engine**).
+  - `u2net\u2net.onnx` (~176MB, legacy balanced model).
+  - `silueta\silueta.onnx` (~44MB, ultra-fast model).
+  - `birefnet-general-lite\birefnet-general-lite.onnx` (~220MB, bilateral reference transformer).
+  - `u2net_human_seg\u2net_human_seg.onnx` (~176MB, human portrait segmentation model).
+
 ---
 
-## 3. Desktop Application Architecture
-- **No Console Window:** Launches via `pythonw.exe app.py` (or `launch.vbs`), ensuring 0 black command prompt windows appear in `Alt + Tab`.
-- **Desktop Shortcut:** `C:\Users\Windows\Desktop\Background Remover.lnk` -> points to `pythonw.exe "D:\BG-Remover\app.py"` with icon `D:\BG-Remover\assets\app_icon.ico,0`.
-- **Isolated Window:** Spawns Edge in standalone app mode (`--app=http://127.0.0.1:PORT`) with dedicated user profile (`D:\BG-Remover\profile`) so it never conflicts with regular browser sessions.
-- **Port Detection & Readiness:** Dynamically binds available port starting at `7860`, probes socket readiness before window launch to prevent blank white screens.
-- **Watchdog Keep-Alive:** Frontend pings `/api/ping` every 2.5s. If window is closed, watchdog automatically shuts down the Python process after 8s of inactivity.
+## 3. Desktop Application Architecture & UX Design
+- **Zero-Friction "Auto-Pilot" Experience:**
+  - The top header is completely decluttered of technical engineering knobs (model pickers, defringe dropdowns, matting thresholds).
+  - A user simply presses `Ctrl + V` or drops an image; the app executes the optimal GPU-accelerated pipeline under the hood.
+  - Header layout: Brand Logo + **BG Remover** + `⚡ GPU Accelerated` badge on the left, and a single **Auto-copy result** checkbox toggle on the right.
+- **Preserved Interactive View Toolbar:**
+  - Positioned directly above the canvas stage:
+    `View: [Split Slider] [Side-by-Side] [Cutout Only] [🖌️ Refine Brush]`
+    `Backdrop: [Dark Checker] [Light Checker] [Solid Black] [Solid White] [Green Screen]`
+- **Headless Desktop Window Launch:**
+  - Launches via `pythonw.exe app.py` (or `launch.vbs`), ensuring 0 black command prompt windows appear in `Alt + Tab`.
+  - Spawns Edge in standalone app mode (`--app=http://127.0.0.1:PORT`) with an isolated profile in `D:\BG-Remover\profile` to avoid conflicts with personal browser tabs.
+  - Dynamic port binding starting at `7860`, with socket readiness probing before window spawn.
+  - Watchdog keep-alive terminates the Python process after 60s of complete idle silence to free all system RAM and GPU resources.
 
 ---
 
-## 4. Key Engineering & Algorithm Fixes
-1. **Split-Slider Layering:**
-   - Bottom layer: Cutout on active backdrop (Dark/Light Checkerboard, Black, White, Green Screen).
-   - Top layer: Original image clipped on left side via CSS `clip-path: polygon(...)`.
-2. **Anti-Aliasing (No Jaggedness):**
-   - `post_process_mask=False` in `rembg.remove` (bypasses rembg's internal 1-bit hard thresholding `np.where(mask < 127, 0, 255)`).
-   - Preserves continuous 8-bit alpha transitions.
-3. **Sub-Pixel Edge Defringe:**
-   - Replaced harsh box `MinFilter` with a continuous alpha curve adjustment (`cutoff = 0.05 * trim_px`) and a 0.35px Gaussian feather.
-   - Eliminates dark background bleed without stair-stepping.
-4. **Dual-Pass Saliency Fusion (`fuse_dual_pass_saliency`):**
-   - Solves white-on-white / color camouflage false cutouts (e.g. white shrimp meat on white backgrounds).
-   - Pass 1: AI color saliency.
-   - Pass 2: AI luminance / desaturated saliency (forces AI to segment by structural contours, texture, and shading).
-   - Background Color Filtering: Suppresses grayscale false-fill on pixels matching the sampled background color, preventing hollow loops (headphones, mug handles) from being falsely filled in.
-   - Union: `np.maximum(color_mask, gray_mask_filtered)` retains camouflaged subjects while respecting topological holes.
-5. **Interactive Smart AI Brush & Magic Tap (remove.bg-style Object/Hole Segmentation):**
-   - **✨ Smart AI Auto-Snap Mode:** Rather than requiring manual pixel-by-pixel tracing, rough strokes sample target seeds and expand via edge-contrast barriers (gradient stopping) to automatically snap to the subject's contours. Protects foreground objects from accidental erasure.
-   - **🪄 Magic Tap (One-Click Hole Remover):** Single-click BFS bounded region flooding removes enclosed background pockets (e.g. headphone loop interior, mug handles, arms/legs) in ~10–25ms.
-   - **🖌️ Manual Mode:** Direct pixel eraser/restore retained for explicit pixel-level touch-ups.
-   - **Adjustable Tolerance Slider:** Controls expansion over gradients and shadow penumbras while preserving high-contrast object rims.
-   - **High-Performance Dirty Rect Updates:** Sub-rectangle GPU transfers (`0.2ms` per stamp) enable silky-smooth 60 FPS interactive dragging on multi-megapixel images.
-   - **GPU Undo/Redo Engine:** Uses `createImageBitmap` snapshots (~0.4ms overhead) with 15-step undo/redo stack (`Ctrl + Z` / `Ctrl + Y`).
+## 4. End-to-End Image Processing Pipeline (`app.py`)
+Every pasted or uploaded image is processed through a cascaded 9-stage computer vision pipeline:
 
-6. **Color-Guided Fine Detail & Micro-Structure Recovery (`recover_fine_details`):**
-   - High-resolution segmentation models (like IS-Net) naturally segment macro silhouettes and holes, but can assign faint confidence (alpha 2–20) to thin 1-pixel structures (like headphone audio cords, antennae, and fine hair).
-   - Automatically samples background color from verified perimeter background pixels.
-   - Pixels where the model detected a trace of foreground (`mask > 1`) and whose color has high contrast against the background ($\Delta E > 38$) are dynamically boosted to full opacity.
-   - Achieves 100% remove.bg parity (intact cords, wires, and hollow loops) in ~1.9s on CPU without requiring heavy cloud GPUs.
-7. **Color Spill Decontamination & Foreground Unmixing (`decontaminate_color_spill`):**
-   - Eliminates color bleeding, chromatic fringes, and background halos (e.g. green cast from green-screens, or bleached frosty edges from white studio backdrops).
-   - Uses multi-level Laplacian pyramid foreground estimation (Germer et al., 2020 via `pymatting`) executed directly on the post-guided-filter continuous alpha matte.
-   - $C^1$ Continuous Core Preservation: pixels with $\alpha \ge 0.98$ strictly preserve 100% original camera sensor pixels, while transition pixels ($0.02 < \alpha < 0.98$) are unmixed to true foreground color.
-   - Added `Color Decontam` checkbox to top control bar (enabled by default) with instant auto-reprocess on toggle.
-8. **Spatially-Varying Local Background Field (`compute_local_background_field`):**
-   - Replaces the single global border median with an exact $O(N)$ Euclidean Distance Transform nearest-neighbor propagation field.
-   - Prevents studio lighting gradients, vignettes, and shadows from confusing the webbing suppression and detail recovery filters, cleanly purging background pockets trapped in hair curls and handles.
-9. **Closed-Form Alpha Matting (`refine_alpha_matting`):**
-   - Levin et al. Closed-Form Matting solving the Matting Laplacian over an adaptive trimap ($0.05 < \alpha < 0.95$).
-   - Added `Studio Matting` toggle to top control bar for human portraits, pets, and fine fur.
-10. **DirectML Hardware Acceleration (`DmlExecutionProvider`):**
-    - Configured `onnxruntime-directml` to execute neural network inference directly on the on-board Intel UHD Graphics 620 GPU via Microsoft DirectX 12.
-    - Offloads compute-heavy tensor operations from the CPU, keeping the laptop responsive.
-    - Zero impact on laptop processing when idle or not using the app (VRAM and GPU queues are completely released).
-11. **Streamlined Auto-Pilot UX:**
-    - Replaced technical dropdowns (AI models, defringe, matting thresholds) with a clean consumer interface.
-    - Automatically runs the optimal GPU-accelerated pipeline under the hood (DirectML GPU + IS-Net + Local Background Field + Decontam + Optical Anti-Aliasing).
-    - Preserves the full View Toolbar (Split Slider, Side-by-Side, Cutout Only, Refine Brush Studio) and Backdrop Swatches untouched.
+1. **Macro Saliency Inference (DirectML GPU):**
+   - High-resolution $1024 \times 1024$ dichotomous segmentation via `isnet-general-use.onnx`.
+   - Executed on Intel UHD 620 GPU via DirectX 12 (`DmlExecutionProvider`), taking $\sim 1.62\text{s}$ steady-state without CPU thermal throttling.
+2. **Spatially-Varying Local Background Field (`compute_local_background_field`):**
+   - Vectorized $O(N)$ Euclidean Distance Transform (EDT) nearest-neighbor propagation ($\sim 100\text{ms}$).
+   - Maps every pixel to the RGB color of its closest confirmed background pixel, accurately modeling studio lighting gradients, vignettes, and shadows.
+3. **Local Cavity & Webbing Suppression (`suppress_background_webbing`):**
+   - Compares ambiguous non-solid pixels against the local background field.
+   - Pockets showing through cords, spokes, or hair curls matching local backdrop ($\Delta E < 26$) are suppressed to transparent.
+4. **Selective Fine Detail & Cord Recovery (`recover_fine_details`):**
+   - Protects solid boundaries (`mask >= 180` dilated by 4px).
+   - Dynamically boosts isolated thin structures (headphone cords, wires, hair strands) having high contrast against local background ($\Delta E > 38$).
+5. **Distance-Aware Orphan Island Pruning (`clean_orphan_islands_distance`):**
+   - Connected component analysis with Euclidean distance transform from primary subject.
+   - Small noise components ($< 3\%$ of subject) located $> 30\text{px}$ away from the subject in empty background are purged.
+6. **Sub-Pixel Optical Anti-Aliasing (`fast_guided_filter`):**
+   - Fast $O(1)$ Guided Filter (He et al., IEEE TPAMI) using photographic luminance as guidance.
+   - Converts quantized step-transitions into smooth sub-pixel continuous optical gradients in $\sim 15\text{ms}$.
+7. **Continuous Edge Defringing:**
+   - Smooth continuous power-curve defringe without harsh 1-bit box-filter staircase jaggedness.
+8. **Color Spill Decontamination (`decontaminate_color_spill`):**
+   - Multi-level Laplacian pyramid foreground estimation (Germer et al., IEEE TPAMI 2020 via `pymatting`).
+   - Unmixes and cancels background color bleeding and reflections from semi-transparent boundaries ($0.02 < \alpha < 0.98$).
+   - $C^1$ continuous core preservation: pixels with $\alpha \ge 0.98$ retain $100\%$ untouched camera sensor pixels.
+9. **Alpha Premultiplication:**
+   - Zeroes out RGB values where alpha is 0, outputting a clean transparent RGBA PNG.
+
 ---
 
-## 5. File Structure
-```text
-D:\BG-Remover\
-├── assets/
-│   ├── app_icon.ico       # Active desktop shortcut icon
-│   ├── icon.ico           # Backup multi-resolution icon bundle
-│   └── icon.png           # App header logo & web favicon
-├── app.py                 # Full self-contained app (backend + frontend template + window controller)
-├── launch.vbs             # Silent VBScript launcher
-├── run.bat                # Batch runner using start "" pythonw.exe
-├── requirements.txt       # Dependencies
-├── .gitignore             # Git ignore rules
-├── LICENSE                # MIT License
-├── README.md              # Documentation
-├── RESEARCH.md            # Deep CV research & remove.bg reverse-engineering documentation
-└── CONTEXT.md             # This context file for future sessions
-```
+## 5. Interactive Studio: Smart AI Brush & Magic Tap
+For complex images with touching environmental clutter (e.g. sunscreen bottle on beach with miniature people):
+- **🪄 Magic Tap (`M` key):** Single-click BFS flood fill bounded by local gradient barriers. Tapping touching scene clutter with high contrast ($\Delta E > 230$) erases it cleanly up to the product boundary in $\sim 15\text{ms}$.
+- **✨ Smart AI Brush (`S` key):** Auto-snapping brush that expands inside the brush circle but halts sharply at high-contrast subject edges.
+- **GPU Undo/Redo Engine:** `createImageBitmap` snapshots (~0.4ms overhead) with 15-step undo/redo stack (`Ctrl + Z` / `Ctrl + Y`).
+
+---
+
+## 6. Literature & Architectural Research Summary (`RESEARCH.md`)
+The `RESEARCH.md` document is structured into 3 distinct sections:
+- **Part 1 (Chronological Log):** Append-only engineering log tracking daily findings, failures, and mathematical solutions from 2026-09-11 to 2026-09-14.
+- **Part 2 (Thematic Synthesis):**
+  - Synthesizes academic references:
+    - *Semantic Soft Segmentation (Aksoy, Paris et al., SIGGRAPH 2018 / Adobe)*: Fusing deep CNN semantic feature vectors with Matting Laplacian affinities.
+    - *Closed-Form Natural Image Matting (Levin et al., IEEE TPAMI 2008)*: Solving the Matting Laplacian over adaptive trimaps.
+    - *greenScreen.AI Lessons (Shperber, Towards Data Science 2017)*: Handheld objects, dataset coarse-polygon limitations, and why CRFs fail.
+  - Documents the 7 Major Failure Modes Identified & Solved.
+- **Part 3 (Conclusions So Far):** The Two-Stage Paradigm, Local over Global fields, and Consumer Appliance UX.
+
+---
+
+## 7. Next Milestones on the Roadmap
+1. **Quantized E-Commerce Packshot Model (RMBG-1.4 INT8):**
+   - Integrate an 85MB INT8 quantized packshot model trained specifically on commercial product catalogs to automatically reject touching beach sand and props.
+2. **Clipboard Auto-Watch (Ghost Mode):**
+   - Background worker thread monitoring Windows clipboard (`ImageGrab`) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
+3. **Auto-Crop to Subject:**
+   - Automatic bounding-box trimming (`Image.getbbox()`) with configurable padding to eliminate excessive transparent margins.
+
+---
+
+## 8. Development Commands & Hygiene
+- **Run App:** `"C:\Users\Windows\AppData\Local\Programs\Python\Python311\pythonw.exe" app.py` (or double-click `launch.vbs`).
+- **Syntax Check:** `"C:\Users\Windows\AppData\Local\Programs\Python\Python311\python.exe" -m py_compile app.py`
+- **Dependencies:** `requirements.txt` (`onnxruntime-directml`, `rembg`, `Pillow`, `scipy`, `numpy`, `pymatting`).
+- **GitHub Commits:** Every milestone MUST be committed and pushed immediately to `git@github.com:Hecattez/BG-Remover.git` on branch `main`.
