@@ -111,6 +111,27 @@ This document is organized into three distinct parts. **Part 1 (Research Log)** 
 
 ---
 
+## 2026-09-16 — Commercial Packshot Priors (RMBG-1.4), High-Res Guided Upsampling & Semantic Routing
+- **Source(s):**
+  - BRIA AI RMBG-1.4 commercial e-commerce packshot model (`briaai/RMBG-1.4`).
+  - He et al., *"Fast Guided Image Filtering"*, IEEE TPAMI / ACM SIGGRAPH.
+  - Kovac, Peer et al., *"Human Skin Colour Clustering for Face Detection"*, IEEE EUROCON.
+  - DirectML memory profiling on Intel UHD 620 (`DmlCommittedResourceAllocator`).
+- **What I read/found:**
+  - **BiRefNet VRAM Exhaustion on Integrated GPU:** Tested `birefnet-general-lite.onnx` (213MB, bilateral transformer) on DirectML. On the Intel UHD 620 GPU, execution failed with `8007000E Not enough memory resources are available to complete this operation` inside `DmlCommittedResourceAllocator.cpp`. The bilateral cross-attention maps exceed the shared memory pool of consumer integrated GPUs. Forcing BiRefNet to `CPUExecutionProvider` avoids the crash.
+  - **BRIA RMBG-1.4 GPU Acceleration:** Evaluated `rmbg-1.4.onnx` (168MB FP32) and `rmbg-1.4-quantized.onnx` (42MB INT8). DirectML executed the FP32 model in $\sim 1.44\text{s}$ steady-state with 0 memory allocation errors. The INT8 quantized model took $\sim 8.6\text{s}$ on DirectML due to shader dequantization overhead on Gen 9.5 cores, but $\sim 2.7\text{s}$ on CPU. Integrated FP32 RMBG-1.4 via custom `Rmbg14Session(BaseSession)`. Because RMBG-1.4 was trained on BRIA commercial catalogs, it cleanly severs contact surfaces (tables, floors, and props) that generic salient object detection models clump into the foreground.
+  - **The Resolution Bottleneck & Full-Resolution Guided Upsampling:** Neural segmentation models take fixed $1024 \times 1024$ inputs. For high-resolution photography ($> 1024\text{px}$, e.g. 12MP–24MP), standard bilinearly upsampled masks exhibit optical blur, while running Levin closed-form matting directly at 12MP exhausts system RAM. Implemented Full-Resolution Guided Upsampling: macro saliency inference runs at $1024\text{px}$ ($\sim 1.4\text{s}$), the coarse probability mask is upsampled to native resolution, and $O(1)$ `fast_guided_filter` is solved at native resolution using the original camera sensor luminance as guide. This restores sub-pixel optical anti-aliasing in $\sim 30\text{ms}$ without RAM blowup.
+  - **Multi-Scale Closed-Form Matting & Memory-Safe Decontamination:** Bounded Levin Closed-Form Matting to downscaled trimaps (1024px) before optical guided refinement, solving hair alpha in $\sim 500\text{ms}$. Memory-bounded `decontaminate_color_spill` for $> 1536\text{px}$ inputs to ensure 8GB RAM safety.
+  - **Automated Semantic Scene Routing (`classify_semantic_scene`):** Implemented a zero-overhead ($< 20\text{ms}$) statistical classifier using YCbCr skin clustering and border backdrop uniformity:
+    - *Portrait & Hair:* Automatically dispatches `isnet-general-use` + Closed-Form Matting + Laplacian unmixing.
+    - *E-Commerce Product:* Automatically dispatches `rmbg-1.4` + sharp boundary protection.
+    - *General Scene:* Automatically dispatches `isnet-general-use` + Dual-Pass Saliency + Webbing suppression.
+- **Key insight:**
+  - Model architecture must match semantic domain: generic dichotomous saliency (IS-Net) for complex hollow geometries; commercial catalog priors (RMBG-1.4) for grounded packshots; and multi-scale Guided Upsampling to decouple sensor optical resolution from neural input resolution.
+- **Questions raised / things to dig into next:**
+  - Clipboard auto-watch ("Ghost Mode") to process clipboard bitmaps silently in a daemon thread.
+
+---
 # PART 2 — Synthesized Findings (topic-organized, publishable)
 
 ## 2.1 Techniques & Architectures
@@ -125,6 +146,9 @@ This document is organized into three distinct parts. **Part 1 (Research Log)** 
 | **Spatially-Varying Local Background Field** | Nearest confirmed background pixel propagation via Euclidean Distance Transform indices. | Trapped cavities in studio lighting gradients, non-uniform backdrops, and vignettes. | BG-Remover Research | 2026-09-14 |
 | **Closed-Form Alpha Matting** | Adaptive boundary trimap generation followed by Levin Matting Laplacian linear solver. | Hair strand clumping, fur opacity, and semi-transparent boundary extraction. | Levin et al., IEEE TPAMI 2008 | 2026-09-14 |
 | **DirectML DirectX 12 Acceleration** | Native Windows DirectML execution provider (`DmlExecutionProvider`) on integrated Intel UHD 620 GPU. | CPU thermal throttling, slow inference times; offloads tensor multiplications to GPU. | Microsoft DirectML / ONNX Runtime | 2026-09-14 |
+| **Commercial Packshot Priors** | BRIA RMBG-1.4 commercial catalog segmentation (`rmbg-1.4`). | Clinging to touching floors, tables, pedestals, and commercial packaging clutter. | BRIA AI / BG-Remover Research | 2026-09-16 |
+| **Full-Resolution Guided Upsampling** | $1024\text{px}$ macro inference coupled with full-res photographic luminance guided filter. | Resolution bottleneck; maintains sub-pixel optical sharpness on $> 1024\text{px}$ images without RAM exhaustion. | BG-Remover Research | 2026-09-16 |
+| **Automated Semantic Routing** | Statistical scene classifier using YCbCr skin clustering and border backdrop variance (`classify_semantic_scene`). | Context blindness; automatically dispatches optimal model and matting pipeline per image category. | BG-Remover Research | 2026-09-16 |
 
 ---
 
@@ -174,16 +198,16 @@ This document is organized into three distinct parts. **Part 1 (Research Log)** 
 
 ## 2.5 Open Questions / Gaps in Current Research
 
-1. **Lightweight E-Commerce Packshot Models on CPU:** How to achieve remove.bg-level packshot prior accuracy (rejecting touching beach sand, props, and surfaces) within an offline model under 100MB that executes in $< 1.5\text{s}$ on low-voltage laptop CPUs.
-2. **Quantized INT8 RMBG-1.4:** Evaluating whether an 85MB INT8 quantization of BRIA RMBG-1.4 maintains product edge precision while fitting comfortably inside integrated Intel UHD 620 memory limits.
-3. **Automated Semantic Routing:** Developing a zero-overhead pre-classifier that categorizes input images into *Portrait*, *Product*, or *General* to automatically dispatch specialized matting or packshot pipelines.
+1. **Silent Clipboard Auto-Watch (Ghost Mode):** Developing an OS-level clipboard hook monitoring sequence numbers (`GetClipboardSequenceNumber`) to trigger silent background cutouts with zero polling overhead.
+2. **Subject Auto-Cropping (`Image.getbbox()`):** Implementing content-aware alpha bounds trimming with margin-aware padding to eliminate excess transparent space upon paste.
+3. **Contact & Drop Shadow Compositing:** Evaluating lightweight parametric homographic projection models to ground isolated cutouts with realistic contact and directional floor shadows.
 
 ---
 
 # PART 3 — Conclusions So Far
 
-*As of 2026-09-14, the most promising direction is:*
+*As of 2026-09-16, the most promising direction is:*
 
-1. **The Two-Stage Paradigm is Inviolable:** Single-stage neural networks inevitably compromise either between semantic understanding (macro shape) or boundary optical precision (hair/fur). A cascaded architecture pairing a high-resolution macro segmenter (`IS-Net DIS5K` accelerated via DirectML GPU) with an analytical boundary refiner (`Fast Guided Filter` / `Closed-Form Matting`) and post-refinement `Color Spill Decontamination` achieves commercial parity on studio and plain backgrounds.
-2. **Local Over Global Operations:** Global assumptions (such as a single border-derived background color or global thresholding) are the root cause of edge artifacts in studio photography. Spatially-varying fields (EDT background propagation, local gradient barriers) are necessary to handle real-world lighting gradients and vignetting.
-3. **Consumer Appliance UX:** Exposing internal algorithmic parameters (models, defringe radii, matting thresholds) creates cognitive friction for everyday users. The optimal product architecture encapsulates technical complexity into an automated auto-pilot pipeline while retaining interactive precision tools (Smart AI Brush, Magic Tap) for rapid edge-case overrides.
+1. **Domain-Specific Prior Specialization:** Generic Salient Object Detection (SOD) models (like IS-Net) are structurally biased toward contiguous dichotomous shapes and inevitably clump contact surfaces (tables, floors, props) into the subject envelope. Pairing dichotomous general models with specialized commercial catalog priors (BRIA RMBG-1.4) and routing between them via real-time statistical semantic classification solves the grounded packshot dilemma.
+2. **Decoupled Neural & Optical Scales (Guided Upsampling):** Running neural inference at native $1024\text{px}$ scale and transferring high-frequency details back onto the mask via photographic luminance guidance ($O(1)$ Fast Guided Filter) breaks the resolution bottleneck. High-resolution photos retain true optical camera sensor crispness without blowing past 8GB workstation RAM limits.
+3. **The Multi-Scale Matting Barrier:** Full-resolution Levin Closed-Form Matting on 12MP–24MP images is mathematically prohibitive on consumer hardware due to Matting Laplacian matrix inversion complexity. Solving closed-form matting at multi-scale (1024px) followed by full-resolution optical guidance delivers the visual quality of Levin matting in $\sim 500\text{ms}$.

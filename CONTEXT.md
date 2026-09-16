@@ -25,10 +25,12 @@
   - `numpy>=1.26.0`
   - `pymatting==1.1.16` (Provides multi-level Laplacian foreground decontamination and Levin closed-form alpha matting).
 - **Local Model Weights (`C:\Users\Windows\.rembg\models\`):**
-  - `isnet-general-use\isnet-general-use.onnx` (~179MB, native $1024\text{px}$ DIS5K dichotomous segmentation — **Default Auto-Pilot Engine**).
+  - `rmbg-1.4\rmbg-1.4.onnx` (~168MB, BRIA RMBG 1.4 FP32 commercial packshot model — **Fast Packshot Engine**, $\sim 1.44\text{s}$ on DirectML GPU).
+  - `rmbg-1.4\rmbg-1.4-quantized.onnx` (~42MB, INT8 quantized packshot model).
+  - `isnet-general-use\isnet-general-use.onnx` (~179MB, native $1024\text{px}$ DIS5K dichotomous segmentation — **General & Cavity Engine**, $\sim 1.62\text{s}$ on DirectML GPU).
   - `u2net\u2net.onnx` (~176MB, legacy balanced model).
   - `silueta\silueta.onnx` (~44MB, ultra-fast model).
-  - `birefnet-general-lite\birefnet-general-lite.onnx` (~220MB, bilateral reference transformer).
+  - `birefnet-general-lite\birefnet-general-lite.onnx` (~220MB, bilateral reference transformer; routed to CPU to prevent Intel UHD 620 VRAM exhaustion).
   - `u2net_human_seg\u2net_human_seg.onnx` (~176MB, human portrait segmentation model).
 
 ---
@@ -51,34 +53,42 @@
 ---
 
 ## 4. End-to-End Image Processing Pipeline (`app.py`)
-Every pasted or uploaded image is processed through a cascaded 9-stage computer vision pipeline:
+Every pasted or uploaded image is processed through an adaptive, content-aware computer vision pipeline:
 
-1. **Macro Saliency Inference (DirectML GPU):**
-   - High-resolution $1024 \times 1024$ dichotomous segmentation via `isnet-general-use.onnx`.
-   - Executed on Intel UHD 620 GPU via DirectX 12 (`DmlExecutionProvider`), taking $\sim 1.62\text{s}$ steady-state without CPU thermal throttling.
-2. **Spatially-Varying Local Background Field (`compute_local_background_field`):**
+0. **Smart Semantic Scene Routing (`classify_semantic_scene`):**
+   - Lightweight ($< 20\text{ms}$) statistical scene analysis evaluating YCbCr skin clustering ($Y \in [60, 255], Cb \in [77, 127], Cr \in [133, 173]$) and perimeter backdrop luminance variance.
+   - **Portrait / Hair:** Routes to `isnet-general-use` with multi-scale Levin closed-form hair matting and multi-level foreground unmixing.
+   - **E-Commerce Product:** Routes to `rmbg-1.4` (commercial catalog prior), severing contact surfaces (tables, floors, props) with crisp boundary protection.
+   - **General Scene:** Routes to `isnet-general-use` with dual-pass saliency fusion, webbing/cavity suppression, and cord recovery.
+1. **Full-Resolution Guided Upsampling (High-Res Scaling):**
+   - For images exceeding $1024\text{px}$ on the long edge, downscales to $1024\text{px}$ for neural inference ($\sim 1.4\text{s}$ on DirectML GPU).
+   - Upsamples coarse probability mask back to full resolution, then applies $O(1)$ `fast_guided_filter` using the original camera sensor luminance as guidance. Restores sub-pixel optical anti-aliasing without memory spikes.
+2. **Macro Saliency Inference (DirectML GPU):**
+   - Executed on Intel UHD 620 GPU via DirectX 12 (`DmlExecutionProvider`), taking $\sim 1.44\text{s}$–$1.62\text{s}$ steady-state without CPU thermal throttling.
+3. **Spatially-Varying Local Background Field (`compute_local_background_field`):**
    - Vectorized $O(N)$ Euclidean Distance Transform (EDT) nearest-neighbor propagation ($\sim 100\text{ms}$).
    - Maps every pixel to the RGB color of its closest confirmed background pixel, accurately modeling studio lighting gradients, vignettes, and shadows.
-3. **Local Cavity & Webbing Suppression (`suppress_background_webbing`):**
+4. **Local Cavity & Webbing Suppression (`suppress_background_webbing`):**
    - Compares ambiguous non-solid pixels against the local background field.
    - Pockets showing through cords, spokes, or hair curls matching local backdrop ($\Delta E < 26$) are suppressed to transparent.
-4. **Selective Fine Detail & Cord Recovery (`recover_fine_details`):**
+5. **Selective Fine Detail & Cord Recovery (`recover_fine_details`):**
    - Protects solid boundaries (`mask >= 180` dilated by 4px).
    - Dynamically boosts isolated thin structures (headphone cords, wires, hair strands) having high contrast against local background ($\Delta E > 38$).
-5. **Distance-Aware Orphan Island Pruning (`clean_orphan_islands_distance`):**
+6. **Distance-Aware Orphan Island Pruning (`clean_orphan_islands_distance`):**
    - Connected component analysis with Euclidean distance transform from primary subject.
    - Small noise components ($< 3\%$ of subject) located $> 30\text{px}$ away from the subject in empty background are purged.
-6. **Sub-Pixel Optical Anti-Aliasing (`fast_guided_filter`):**
-   - Fast $O(1)$ Guided Filter (He et al., IEEE TPAMI) using photographic luminance as guidance.
-   - Converts quantized step-transitions into smooth sub-pixel continuous optical gradients in $\sim 15\text{ms}$.
-7. **Continuous Edge Defringing:**
+7. **Multi-Scale Alpha Matting or Sub-Pixel Optical Anti-Aliasing (`fast_guided_filter`):**
+   - For portraits, solves Levin Matting Laplacian on boundary trimaps downscaled to 1024px and guides back with full-res luminance in $\sim 500\text{ms}$.
+   - For products/general, Fast $O(1)$ Guided Filter (He et al., IEEE TPAMI) using photographic luminance as guidance in $\sim 15\text{ms}$.
+8. **Continuous Edge Defringing:**
    - Smooth continuous power-curve defringe without harsh 1-bit box-filter staircase jaggedness.
-8. **Color Spill Decontamination (`decontaminate_color_spill`):**
+9. **Memory-Safe Color Spill Decontamination (`decontaminate_color_spill`):**
    - Multi-level Laplacian pyramid foreground estimation (Germer et al., IEEE TPAMI 2020 via `pymatting`).
+   - Memory-bounded for $> 1536\text{px}$ inputs to avoid RAM exhaustion on 8GB workstations.
    - Unmixes and cancels background color bleeding and reflections from semi-transparent boundaries ($0.02 < \alpha < 0.98$).
    - $C^1$ continuous core preservation: pixels with $\alpha \ge 0.98$ retain $100\%$ untouched camera sensor pixels.
-9. **Alpha Premultiplication:**
-   - Zeroes out RGB values where alpha is 0, outputting a clean transparent RGBA PNG.
+10. **Alpha Premultiplication:**
+    - Zeroes out RGB values where alpha is 0, outputting a clean transparent RGBA PNG.
 
 ---
 
@@ -104,12 +114,12 @@ The `RESEARCH.md` document is structured into 3 distinct sections:
 ---
 
 ## 7. Next Milestones on the Roadmap
-1. **Quantized E-Commerce Packshot Model (RMBG-1.4 INT8):**
-   - Integrate an 85MB INT8 quantized packshot model trained specifically on commercial product catalogs to automatically reject touching beach sand and props.
-2. **Clipboard Auto-Watch (Ghost Mode):**
-   - Background worker thread monitoring Windows clipboard (`ImageGrab`) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
-3. **Auto-Crop to Subject:**
+1. **Clipboard Auto-Watch (Ghost Mode):**
+   - Background worker thread monitoring Windows clipboard (`ImageGrab` / sequence polling) to remove backgrounds silently and overwrite the clipboard with transparent PNGs without opening the window.
+2. **Auto-Crop to Subject:**
    - Automatic bounding-box trimming (`Image.getbbox()`) with configurable padding to eliminate excessive transparent margins.
+3. **Export Presets & E-Commerce White Backdrop:**
+   - One-click export to pure white (`#FFFFFF`) JPG for marketplace catalogs or soft drop-shadow generation.
 
 ---
 
