@@ -126,8 +126,13 @@ This document is organized into three distinct parts. **Part 1 (Research Log)** 
     - *Portrait & Hair:* Automatically dispatches `isnet-general-use` + Closed-Form Matting + Laplacian unmixing.
     - *E-Commerce Product:* Automatically dispatches `rmbg-1.4` + sharp boundary protection.
     - *General Scene:* Automatically dispatches `isnet-general-use` + Dual-Pass Saliency + Webbing suppression.
+  - **Integrated GPU Memory Ceiling & Heterogeneous Co-Pilot Architecture:**
+    - Diagnosed DirectML crash `8007000E E_OUTOFMEMORY` on Intel UHD 620 when attempting to hold both `isnet-general-use` and `rmbg-1.4` in the shared GPU workspace simultaneously ($> 2.2\text{GB}$ VRAM pressure).
+    - Implemented **Dedicated GPU Master + CPU Co-Pilot**: `isnet-general-use` is assigned exclusively to the GPU via DirectML ($\sim 1.6\text{s}$), while `rmbg-1.4` executes on the 4-core i5 CPU ($\sim 1.9\text{s}$) using $0\text{ MB}$ of GPU memory.
+    - Added defensive automatic fallback: catches any unexpected DirectML GPU allocation pressure and transparently reruns inference on CPU without user interruption.
+    - Implemented a universal multi-format paste engine supporting raw bitmaps, Pinterest HTML `<img src="...">` tags, and image URLs via an internal CORS proxy.
 - **Key insight:**
-  - Model architecture must match semantic domain: generic dichotomous saliency (IS-Net) for complex hollow geometries; commercial catalog priors (RMBG-1.4) for grounded packshots; and multi-scale Guided Upsampling to decouple sensor optical resolution from neural input resolution.
+  - On resource-constrained integrated graphics hardware (Intel UHD 620, 8GB shared RAM), multi-model pipelines must adopt a heterogeneous compute strategy (GPU Master + CPU Co-Pilot) rather than attempting to co-locate multiple dense CNNs in shared VRAM.
 - **Questions raised / things to dig into next:**
   - Clipboard auto-watch ("Ghost Mode") to process clipboard bitmaps silently in a daemon thread.
 

@@ -104,10 +104,12 @@ class Rmbg14Session(BaseSession):
 if not any(sc.name() == "rmbg-1.4" for sc in sf.sessions_class):
     sf.sessions_class.append(Rmbg14Session)
 
-def get_session(model_name: str):
+def get_session(model_name: str, force_cpu: bool = False):
     if model_name not in AVAILABLE_MODELS or model_name == "auto":
         model_name = "isnet-general-use"
-    if model_name not in sessions:
+
+    session_key = f"{model_name}_cpu" if force_cpu else model_name
+    if session_key not in sessions:
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = min(4, multiprocessing.cpu_count())
         opts.inter_op_num_threads = 1
@@ -116,16 +118,19 @@ def get_session(model_name: str):
 
         available_providers = ort.get_available_providers()
         providers = []
-        # BiRefNet exceeds integrated GPU VRAM on UHD 620; force CPU to prevent OOM
-        if model_name != "birefnet-general-lite" and "DmlExecutionProvider" in available_providers:
+
+        # Option 1: GPU Master + CPU Co-Pilot
+        # Only isnet-general-use occupies the Intel UHD 620 GPU via DirectML.
+        # rmbg-1.4 and other models run on CPU to avoid GPU shared VRAM collisions.
+        if not force_cpu and model_name == "isnet-general-use" and "DmlExecutionProvider" in available_providers:
             providers.append("DmlExecutionProvider")
         if "CPUExecutionProvider" in available_providers:
             providers.append("CPUExecutionProvider")
         if not providers:
             providers = None
 
-        sessions[model_name] = new_session(model_name, sess_opts=opts, providers=providers)
-    return sessions[model_name]
+        sessions[session_key] = new_session(model_name, sess_opts=opts, providers=providers)
+    return sessions[session_key]
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -1031,19 +1036,99 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }, 2500);
 
   // Keep server alive while window is open
+  // Helper to fetch an image URL (routed via local proxy to bypass CORS)
+  async function fetchAndProcessImageUrl(url) {
+    try {
+      statusText.innerHTML = `<span>Fetching image from link...</span>`;
+      spinner.style.display = 'inline-block';
+      const proxyUrl = '/api/fetch-url?url=' + encodeURIComponent(url);
+      const resp = await fetch(proxyUrl);
+      if (!resp.ok) {
+        const directResp = await fetch(url);
+        if (!directResp.ok) throw new Error('HTTP ' + resp.status);
+        const blob = await directResp.blob();
+        processImage(new File([blob], 'image.png', { type: blob.type }));
+        return;
+      }
+      const blob = await resp.blob();
+      processImage(new File([blob], 'image.png', { type: blob.type }));
+    } catch (err) {
+      spinner.style.display = 'none';
+      statusText.innerHTML = `<span style="color:#ef4444;">Could not load image link (${err.message}). Right-click the image and select "Copy Image".</span>`;
+    }
+  }
 
-  // Paste Event
-  window.addEventListener('paste', (e) => {
-    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-    for (const item of items) {
-      if (item.type.indexOf('image') !== -1) {
-        const file = item.getAsFile();
-        processImage(file);
-        break;
+  // Universal Robust Paste Event
+  window.addEventListener('paste', async (e) => {
+    e.preventDefault();
+    const clipData = e.clipboardData || window.clipboardData;
+
+    // 1. Direct Clipboard items (standard right-click "Copy Image")
+    if (clipData && clipData.items) {
+      for (const item of clipData.items) {
+        if (item.type.indexOf('image') !== -1) {
+          const file = item.getAsFile();
+          if (file) {
+            processImage(file);
+            return;
+          }
+        }
       }
     }
-  });
 
+    // 2. Direct Clipboard files
+    if (clipData && clipData.files && clipData.files.length > 0) {
+      for (const f of clipData.files) {
+        if (f.type.startsWith('image/')) {
+          processImage(f);
+          return;
+        }
+      }
+    }
+
+    // 3. HTML paste (Pinterest, Google Images, web pages with <img> tags)
+    if (clipData) {
+      const html = clipData.getData('text/html');
+      if (html) {
+        const match = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+        if (match && match[1]) {
+          let src = match[1].replace(/&amp;/g, '&');
+          if (src.startsWith('http://') || src.startsWith('https://')) {
+            await fetchAndProcessImageUrl(src);
+            return;
+          }
+        }
+      }
+
+      // 4. Plain text URL paste (e.g. image link copied from Pinterest)
+      const text = clipData.getData('text/plain').trim();
+      if (text && (text.startsWith('http://') || text.startsWith('https://'))) {
+        if (text.match(/\.(jpeg|jpg|png|webp|avif|gif)(\?.*)?$/i) || text.includes('pinimg.com') || text.includes('imgur.com') || text.includes('images.unsplash.com')) {
+          await fetchAndProcessImageUrl(text);
+          return;
+        }
+      }
+    }
+
+    // 5. System Navigator Clipboard API fallback
+    if (navigator.clipboard && navigator.clipboard.read) {
+      try {
+        const clipItems = await navigator.clipboard.read();
+        for (const clipItem of clipItems) {
+          for (const type of clipItem.types) {
+            if (type.startsWith('image/')) {
+              const blob = await clipItem.getType(type);
+              processImage(new File([blob], 'image.png', { type: type }));
+              return;
+            }
+          }
+        }
+      } catch (err) {}
+    }
+
+    // 6. Helpful error toast if no image was detected
+    statusText.innerHTML = `<span style="color:#f59e0b;">⚠️ No image found in clipboard. Right-click the image and select <strong>"Copy Image"</strong> (not Copy Link), or drag & drop it here.</span>`;
+  });
   // Drag & drop
   ['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, (e) => {
     e.preventDefault(); dropZone.classList.add('dragover');
@@ -2298,6 +2383,9 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
         if parsed.path == "/" or parsed.path == "/index.html":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
         elif parsed.path == "/assets/icon.png":
@@ -2317,6 +2405,32 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(AVAILABLE_MODELS).encode("utf-8"))
+        elif parsed.path == "/api/fetch-url":
+            qs = parse_qs(parsed.query)
+            target_url = qs.get("url", [""])[0]
+            if not target_url or (not target_url.startswith("http://") and not target_url.startswith("https://")):
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Invalid URL")
+                return
+            try:
+                import urllib.request
+                req = urllib.request.Request(target_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    data = resp.read()
+                    ct = resp.headers.get("Content-Type", "image/png")
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                err = str(e).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
         elif parsed.path == "/api/ping":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -2392,21 +2506,35 @@ class BGRemoverServer(SimpleHTTPRequestHandler):
                     infer_img = orig_img
                     infer_bytes = input_bytes
 
-                # Generate initial mask
-                if recover_holes:
-                    cutout_img = fuse_dual_pass_saliency(infer_bytes, infer_img, session)
-                    _, _, _, a = cutout_img.split()
-                    a_coarse = np.array(a)
-                else:
-                    raw_mask_bytes = remove(
-                        infer_bytes,
-                        session=session,
-                        only_mask=True,
-                        post_process_mask=False
-                    )
-                    a_coarse = np.array(Image.open(io.BytesIO(raw_mask_bytes)).convert("L"))
-
-                # Upsample mask back to native full resolution
+                # Generate initial mask with automatic CPU fallback if DirectML encounters GPU memory pressure
+                try:
+                    if recover_holes:
+                        cutout_img = fuse_dual_pass_saliency(infer_bytes, infer_img, session)
+                        _, _, _, a = cutout_img.split()
+                        a_coarse = np.array(a)
+                    else:
+                        raw_mask_bytes = remove(
+                            infer_bytes,
+                            session=session,
+                            only_mask=True,
+                            post_process_mask=False
+                        )
+                        a_coarse = np.array(Image.open(io.BytesIO(raw_mask_bytes)).convert("L"))
+                except Exception as dml_err:
+                    print(f"[DirectML Notice] Auto-fallback to CPU: {dml_err}")
+                    cpu_session = get_session(model_name, force_cpu=True)
+                    if recover_holes:
+                        cutout_img = fuse_dual_pass_saliency(infer_bytes, infer_img, cpu_session)
+                        _, _, _, a = cutout_img.split()
+                        a_coarse = np.array(a)
+                    else:
+                        raw_mask_bytes = remove(
+                            infer_bytes,
+                            session=cpu_session,
+                            only_mask=True,
+                            post_process_mask=False
+                        )
+                        a_coarse = np.array(Image.open(io.BytesIO(raw_mask_bytes)).convert("L"))
                 if is_high_res:
                     a_arr = np.array(Image.fromarray(a_coarse).resize((orig_w, orig_h), Image.Resampling.BILINEAR))
                 else:
@@ -2570,6 +2698,16 @@ def watchdog_monitor():
                 break
 
 if __name__ == "__main__":
+    # Single-Instance check: if already running, focus window and exit
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:7860/api/ping", timeout=0.4) as r:
+            if r.read() == b"pong":
+                launch_app_window("http://127.0.0.1:7860")
+                sys.exit(0)
+    except Exception:
+        pass
+
     PORT = find_open_port(7860)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), BGRemoverServer)
     url = f"http://127.0.0.1:{PORT}"
@@ -2589,7 +2727,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[Prewarm Warning] {e}")
     threading.Thread(target=_prewarm_models, daemon=True).start()
-    # Start watchdog to terminate server only when completely idle for 60s
+    # Start watchdog to terminate server only when completely idle for 120s
     watchdog_thread = threading.Thread(target=watchdog_monitor, daemon=True)
     watchdog_thread.start()
 

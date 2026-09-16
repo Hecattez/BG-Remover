@@ -25,14 +25,23 @@
   - `numpy>=1.26.0`
   - `pymatting==1.1.16` (Provides multi-level Laplacian foreground decontamination and Levin closed-form alpha matting).
 - **Local Model Weights (`C:\Users\Windows\.rembg\models\`):**
-  - `rmbg-1.4\rmbg-1.4.onnx` (~168MB, BRIA RMBG 1.4 FP32 commercial packshot model — **Fast Packshot Engine**, $\sim 1.44\text{s}$ on DirectML GPU).
+  - `isnet-general-use\isnet-general-use.onnx` (~179MB, native $1024\text{px}$ DIS5K dichotomous segmentation — **GPU Master Engine**, $\sim 1.6\text{s}$ on DirectML GPU).
+  - `rmbg-1.4\rmbg-1.4.onnx` (~168MB, BRIA RMBG 1.4 commercial packshot model — **CPU Co-Pilot Engine**, $\sim 1.9\text{s}$ on 4-thread CPU, $0\text{ MB}$ GPU VRAM).
   - `rmbg-1.4\rmbg-1.4-quantized.onnx` (~42MB, INT8 quantized packshot model).
-  - `isnet-general-use\isnet-general-use.onnx` (~179MB, native $1024\text{px}$ DIS5K dichotomous segmentation — **General & Cavity Engine**, $\sim 1.62\text{s}$ on DirectML GPU).
   - `u2net\u2net.onnx` (~176MB, legacy balanced model).
   - `silueta\silueta.onnx` (~44MB, ultra-fast model).
-  - `birefnet-general-lite\birefnet-general-lite.onnx` (~220MB, bilateral reference transformer; routed to CPU to prevent Intel UHD 620 VRAM exhaustion).
+  - `birefnet-general-lite\birefnet-general-lite.onnx` (~220MB, bilateral reference transformer; routed to CPU).
   - `u2net_human_seg\u2net_human_seg.onnx` (~176MB, human portrait segmentation model).
 
+---
+
+## 2.1 Hardware Safety: Dedicated GPU Master + CPU Co-Pilot Architecture
+- **Problem Solved:** On consumer laptops with integrated graphics (Intel UHD 620, 8GB shared RAM), loading two neural models on DirectML simultaneously exhausts shared video memory (`8007000E E_OUTOFMEMORY`).
+- **Architecture:**
+  - **GPU Master (`isnet-general-use`):** Stays resident in GPU memory (~1.1GB workspace), handling complex silhouettes, hair, and cavities in $\sim 1.6\text{s}$.
+  - **CPU Co-Pilot (`rmbg-1.4`):** Runs commercial e-commerce product packshots on the 4-core i5 CPU in $\sim 1.9\text{s}$, consuming $0\text{ MB}$ of GPU memory and eliminating model-swap VRAM collisions.
+  - **Defensive Auto-Fallback:** If DirectML encounters sudden GPU memory pressure, inference automatically catches the exception and falls back to CPU seamlessly.
+  - **Zero Background Resource Cost:** When the app window is closed, the process terminates immediately with `sys.exit(0)`, freeing $100\%$ of RAM and GPU memory so games (Roblox) and heavy tools have full system capacity.
 ---
 
 ## 3. Desktop Application Architecture & UX Design
